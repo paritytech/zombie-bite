@@ -1,0 +1,22 @@
+# Zombie Bite Configuration - All System Chains
+# This configuration enables all available system parachains
+
+[relaychain]
+network = "polkadot"
+
+# All system parachains
+[[parachains]]
+type = "asset-hub"
+enabled = true
+
+[[parachains]]
+type = "coretime"
+enabled = true
+
+[[parachains]]
+type = "people"
+enabled = true
+
+[[parachains]]
+type = "bridge-hub"
+enabled = true

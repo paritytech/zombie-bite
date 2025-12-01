@@ -1,0 +1,22 @@
+# Zombie Bite Configuration - Development with Runtime Overrides
+# Example showing how to test with custom runtime overrides
+
+# Global settings
+base_path = "/tmp/dev-bite"
+and_spawn = true
+with_monitor = false
+
+[relaychain]
+network = "paseo"
+runtime_override = "/path/to/custom/polkadot_runtime.wasm"
+sync_url = "wss://paseo-rpc.dwellir.com"
+
+[[parachains]]
+type = "asset-hub"
+enabled = true
+runtime_override = "/path/to/custom/asset_hub_runtime.wasm"
+
+[[parachains]]
+type = "coretime"
+enabled = true
+runtime_override = "/path/to/custom/coretime_runtime.wasm"

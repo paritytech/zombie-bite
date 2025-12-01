@@ -52,6 +52,7 @@ struct ChainArtifact {
     spec_path: String,
     snap_path: String,
     override_wasm: Option<String>,
+    para_id: Option<u32>,
 }
 
 pub async fn doppelganger_inner(
@@ -134,7 +135,7 @@ pub async fn doppelganger_inner(
         let sync_chain_name = if sync_chain.contains('/') {
             let parts: Vec<&str> = sync_chain.split('/').collect();
             let name_parts: Vec<&str> = parts.last().unwrap().split('.').collect();
-            name_parts.get(0).unwrap().to_string()
+            name_parts.first().unwrap().to_string()
         } else {
             // is not a file
             sync_chain.clone()
@@ -155,9 +156,8 @@ pub async fn doppelganger_inner(
         trace!("snap_path: {snap_path}");
         generate_snap(&sync_db_path, &snap_path).await.unwrap();
 
-        let para_head_str = read_to_string(&sync_head_path).expect(&format!(
-            "read para_head ({sync_head_path}) file should works."
-        ));
+        let para_head_str = read_to_string(&sync_head_path)
+            .unwrap_or_else(|_| panic!("read para_head ({sync_head_path}) file should works."));
         let para_head_hex = if &para_head_str[..2] == "0x" {
             &para_head_str[2..]
         } else {
@@ -175,7 +175,7 @@ pub async fn doppelganger_inner(
             .expect("para_index should be valid. qed");
         para_heads_env.push((
             format!("ZOMBIE_{}", &para_head_key(para.id())[2..]),
-            format!("{}", &para_head[2..]),
+            para_head[2..].to_string(),
         ));
 
         para_artifacts.push(ChainArtifact {
@@ -188,6 +188,7 @@ pub async fn doppelganger_inner(
             spec_path: chain_spec_path,
             snap_path,
             override_wasm: para.wasm_overrides().map(str::to_string),
+            para_id: Some(para.id()),
         });
     }
 
@@ -265,6 +266,7 @@ pub async fn doppelganger_inner(
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
         override_wasm: relay_chain.wasm_overrides().map(str::to_string),
+        para_id: None,
     };
 
     let config = generate_config(
@@ -289,17 +291,29 @@ pub async fn doppelganger_inner(
         .parse::<u64>()
         .expect("read bite rc block should works");
 
-    let ah_start_block = fs::read_to_string(format!("{base_dir_str}/para-1000.txt"))
-        .await
-        .unwrap()
-        .parse::<u64>()
-        .expect("read bite ah block should works");
+    // Collect start blocks for all parachains
+    let mut para_start_blocks = serde_json::Map::new();
+    for para in &paras_to {
+        let para_start_block = fs::read_to_string(format!("{base_dir_str}/para-{}.txt", para.id()))
+            .await
+            .unwrap()
+            .parse::<u64>()
+            .unwrap_or_else(|_| panic!("read bite para-{} block should works", para.id()));
+        para_start_blocks.insert(
+            format!("para_{}_start_block", para.id()),
+            serde_json::Value::Number(para_start_block.into()),
+        );
+    }
 
     // ready to start
-    let ready_content = json!({
+    let mut ready_content = json!({
         "rc_start_block": rc_start_block,
-        "ah_start_block": ah_start_block,
     });
+
+    // Add all parachain start blocks
+    for (key, value) in para_start_blocks {
+        ready_content[key] = value;
+    }
 
     let alice_config = config
         .relaychain()
@@ -308,22 +322,23 @@ pub async fn doppelganger_inner(
         .find(|node| node.name() == "alice")
         .expect("'alice' should exist");
 
-    let ah_config = config
-        .parachains()
-        .into_iter()
-        .last()
-        .expect("shoul be one parachain");
-    let collator_config = ah_config
-        .collators()
-        .into_iter()
-        .last()
-        .expect("should be one collator");
+    // Collect ports for all parachains
+    let mut collator_ports = serde_json::Map::new();
+    for para_config in config.parachains() {
+        if let Some(collator) = para_config.collators().first() {
+            collator_ports.insert(
+                format!("para_{}_collator_port", para_config.id()),
+                serde_json::Value::Number(collator.rpc_port().unwrap().into()),
+            );
+        }
+    }
 
     // ports
-    let ports_content = json!({
-        "alice_port" : alice_config.rpc_port().unwrap(),
-        "collator_port": collator_config.rpc_port().unwrap(),
-    });
+    collator_ports.insert(
+        "alice_port".to_string(),
+        serde_json::Value::Number(alice_config.rpc_port().unwrap().into()),
+    );
+    let ports_content = serde_json::Value::Object(collator_ports);
 
     let _ = fs::write(
         format!("{}/{PORTS_FILE}", global_base_dir.to_string_lossy()),
@@ -336,7 +351,7 @@ pub async fn doppelganger_inner(
     )
     .await;
 
-    clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain).await?;
+    clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
 }
@@ -349,31 +364,28 @@ pub async fn generate_artifacts(
 ) -> Result<(), anyhow::Error> {
     let global_base_dir_str = global_base_dir.to_string_lossy();
 
+    // Load the config from the previous step to get parachain information
+    let from_config_path = format!("{global_base_dir_str}/{}/config.toml", step.dir_from());
+
+    // Parse config to get parachain information
+    let network_config = zombienet_configuration::NetworkConfig::load_from_toml(&from_config_path)
+        .expect("should be able to load config");
+
     // generate snapshot for alice (rc)
     let alice_data = format!("{global_base_dir_str}/{}/alice/data", step.dir());
-
-    // // remove `parachains` db
-    // let parachains_path = format!("{alice_data}/chains/{}/db/full/parachains", rc.as_chain_string());
-    // debug!("Deleting `parachains` db at {parachains_path}");
-    // fs::remove_dir_all(parachains_path)
-    //     .await
-    //     .expect("remove parachains db should work");
 
     let alice_rc_snap_file = format!("alice-{}-snap.tgz", rc.as_chain_string());
     let alice_rc_snap_path = format!("{global_base_dir_str}/{}/{alice_rc_snap_file}", step.dir());
     generate_snap(&alice_data, &alice_rc_snap_path).await?;
 
-    // generate snapshot for alice (rc)
+    // generate snapshot for bob (rc)
     let bob_data = format!("{global_base_dir_str}/{}/bob/data", step.dir());
     let bob_rc_snap_file = format!("bob-{}-snap.tgz", rc.as_chain_string());
     let bob_rc_snap_path = format!("{global_base_dir_str}/{}/{bob_rc_snap_file}", step.dir());
     generate_snap(&bob_data, &bob_rc_snap_path).await?;
 
-    // generate snapshot for collator
-    let collator_data = format!("{global_base_dir_str}/{}/collator/data", step.dir());
-    let ah_snap_file = format!("asset-hub-{}-snap.tgz", rc.as_chain_string());
-    let ah_snap_path = format!("{global_base_dir_str}/{}/{ah_snap_file}", step.dir());
-    generate_snap(&collator_data, &ah_snap_path).await?;
+    let mut snaps = vec![alice_rc_snap_path, bob_rc_snap_path];
+    let mut specs = vec![];
 
     // cp chain-spec for rc
     let rc_spec_file = format!("{}-spec.json", rc.as_chain_string());
@@ -382,17 +394,39 @@ pub async fn generate_artifacts(
     fs::copy(&rc_spec_from, &rc_spec_to)
         .await
         .expect("cp should work");
+    specs.push(rc_spec_to);
 
-    // cp chain-spec for ah
-    let ah_spec_file = format!("asset-hub-{}-spec.json", rc.as_chain_string());
-    let ah_spec_from = format!("{global_base_dir_str}/{}/{ah_spec_file}", step.dir_from());
-    let ah_spec_to = format!("{global_base_dir_str}/{}/{ah_spec_file}", step.dir());
-    fs::copy(&ah_spec_from, &ah_spec_to)
-        .await
-        .expect("cp should work");
+    // Generate snapshots and copy chain-specs for all parachains
+    for para_config in network_config.parachains() {
+        let para_id = para_config.id();
+        let para_chain = para_config.chain().expect("parachain should have a chain");
+        let para_chain_str = para_chain.as_str();
+        let collator_name = format!("Collator-{}", para_id);
 
-    let mut snaps = vec![alice_rc_snap_path, bob_rc_snap_path, ah_snap_path];
-    let mut specs = vec![rc_spec_to, ah_spec_to];
+        // generate snapshot for this parachain's collator
+        let collator_data = format!(
+            "{global_base_dir_str}/{}/{}/data",
+            step.dir(),
+            collator_name
+        );
+        let para_snap_file = format!("{}-snap.tgz", para_chain_str);
+        let para_snap_path = format!("{global_base_dir_str}/{}/{}", step.dir(), para_snap_file);
+        generate_snap(&collator_data, &para_snap_path).await?;
+        snaps.push(para_snap_path);
+
+        // cp chain-spec for this parachain
+        let para_spec_file = format!("{}-spec.json", para_chain_str);
+        let para_spec_from = format!(
+            "{global_base_dir_str}/{}/{}",
+            step.dir_from(),
+            para_spec_file
+        );
+        let para_spec_to = format!("{global_base_dir_str}/{}/{}", step.dir(), para_spec_file);
+        fs::copy(&para_spec_from, &para_spec_to)
+            .await
+            .expect("cp should work");
+        specs.push(para_spec_to);
+    }
 
     // generate custom config
     let from_config_path = format!("{global_base_dir_str}/{}/config.toml", step.dir_from());
@@ -441,6 +475,7 @@ pub async fn clean_up_dir_for_step(
     global_base_dir: PathBuf,
     step: Step,
     rc: &Relaychain,
+    paras: &[Parachain],
 ) -> Result<(), anyhow::Error> {
     let global_base_dir_str = global_base_dir.to_string_lossy();
     // clean bite directory to leave only the needed artifacts
@@ -465,29 +500,35 @@ pub async fn clean_up_dir_for_step(
         .expect("Create step dir should works");
     info!("created dir {step_path}");
 
-    // copy needed files
-    let ah_spec = format!("asset-hub-{}-spec.json", rc.as_chain_string());
-    let ah_snap = format!("asset-hub-{}-snap.tgz", rc.as_chain_string());
+    // Build list of needed files dynamically based on parachains
     let rc_spec = format!("{}-spec.json", rc.as_chain_string());
     let rc_snap = format!("{}-snap.tgz", rc.as_chain_string());
     let alice_snap = format!("alice-{}-snap.tgz", rc.as_chain_string());
-    let bob_snap = format!("bob-{}-snap.tgz", rc.as_chain_string());
-    let mut needed_files = vec!["config.toml", &ah_spec, &ah_snap, &rc_spec];
 
-    if step == Step::Bite {
-        needed_files.push(&rc_snap);
-    } else {
-        needed_files.push(&alice_snap);
-        needed_files.push(&bob_snap);
+    let mut needed_files: Vec<String> = vec!["config.toml".to_string(), rc_spec.clone()];
+
+    // Add parachain files dynamically
+    for para in paras {
+        let para_chain_name = para.as_chain_string(&rc.as_chain_string());
+        let para_spec = format!("{}-spec.json", para_chain_name);
+        let para_snap = format!("{}-snap.tgz", para_chain_name);
+        needed_files.push(para_spec);
+        needed_files.push(para_snap);
     }
 
-    for file in needed_files {
+    if step == Step::Bite {
+        needed_files.push(rc_snap);
+    } else {
+        needed_files.push(alice_snap);
+    }
+
+    for file in &needed_files {
         let from = format!("{debug_path}/{file}");
         let to = format!("{step_path}/{file}");
         info!("mv {from} {to}");
         fs::rename(&from, &to)
             .await
-            .expect(&format!("copy from {from} to {to} should works"));
+            .unwrap_or_else(|e| panic!("Failed to move {from} to {to}: {e}"));
     }
 
     Ok(())
@@ -559,7 +600,10 @@ async fn generate_config(
         get_random_port().await
     };
 
-    // config a new network with alice/bob
+    // Alice + Bob + number of parachains
+    let num_validators = (2 + paras.len()).min(7);
+
+    // config a new network with dynamic validators
     let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {
         let mut default_args = vec![
             ("-l", leaked_rust_log.as_str()).into(),
@@ -583,17 +627,23 @@ async fn generate_config(
             .with_default_db_snapshot(db_path)
             .with_default_args(default_args);
 
-        // We override the code directly in the db
-        // relay_builder = if let Some(override_path) = relaychain.override_wasm {
-        //     relay_builder.with_wasm_override(override_path.as_str())
-        // } else {
-        //     relay_builder
-        // };
+        {
+            let mut relay_builder = relay_builder
+                .with_validator(|node| node.with_name("alice").with_rpc_port(rpc_alice_port))
+                .with_validator(|node| node.with_name("bob").with_rpc_port(rpc_bob_port));
 
-        relay_builder
-            .with_validator(|node| node.with_name("alice").with_rpc_port(rpc_alice_port))
-            .with_validator(|node| node.with_name("bob").with_rpc_port(rpc_bob_port))
+            let additional_validators = ["charlie", "dave", "ferdie", "eve", "one"];
+            // Spawn validators based on total count, accounting for alice and bob already added
+            for name in additional_validators
+                .iter()
+                .take(num_validators.saturating_sub(2))
+            {
+                relay_builder = relay_builder.with_validator(|node| node.with_name(*name));
+            }
+            relay_builder
+        }
     });
+
     if !paras.is_empty() {
         // TODO: enable for multiple paras
         // let validation_context = Rc::new(RefCell::new(ValidationContext::default()));
@@ -666,16 +716,19 @@ async fn generate_config(
                 }
             }
 
+            let para_id = para.para_id.expect("Para id should be available");
+            let collator_name = format!("Collator-{}", para_id);
+
             config = config.with_parachain(|p| {
                 let para_builder = p
-                    .with_id(1000)
+                    .with_id(para_id)
                     .with_chain(para.chain.as_str())
                     .with_default_command(para.cmd.as_str())
                     .with_chain_spec_path(chain_spec_path)
                     .with_default_db_snapshot(db_path);
 
                 para_builder.with_collator(|c| {
-                    c.with_name("collator")
+                    c.with_name(&collator_name)
                         .with_rpc_port(para_rpc_port)
                         .with_args(para_default_args)
                 })
@@ -686,7 +739,7 @@ async fn generate_config(
     let config = if let Some(global_base_dir) = &global_base_dir {
         let fixed_base_dir = global_base_dir.canonicalize().unwrap().join("spawn");
         config.with_global_settings(|global_settings| {
-            global_settings.with_base_dir(&fixed_base_dir.to_string_lossy().to_string())
+            global_settings.with_base_dir(fixed_base_dir.to_string_lossy().to_string())
         })
     } else {
         config
@@ -883,7 +936,9 @@ mod test {
             .await
             .unwrap();
         println!("{:?}", n);
-        loop {}
+        loop {
+            tokio::time::sleep(std::time::Duration::from_secs(5)).await;
+        }
     }
 
     #[tokio::test]
@@ -893,19 +948,34 @@ mod test {
             "--db-cache=24000, --trie-cache-size=24000, --runtime-cache-size=255",
         );
 
+        // Create dummy chain spec and snapshot files
+        let relay_spec_path = "/tmp/test-something.json";
+        let relay_snap_path = "/tmp/test-something.tgz";
+        let ah_spec_path = "/tmp/test-something-ah.json";
+        let ah_snap_path = "/tmp/test-something-ah.tgz";
+
+        // Minimal valid chain spec JSON
+        let minimal_spec = r#"{ "genesis": { "runtime": { "session": { "keys": [] }, "babe": { "authorities": [] }, "grandpa": { "authorities": [] }, "aura": { "authorities": [] } } } }"#;
+        std::fs::write(relay_spec_path, minimal_spec).unwrap();
+        std::fs::write(ah_spec_path, minimal_spec).unwrap();
+        std::fs::write(relay_snap_path, b"dummy").unwrap();
+        std::fs::write(ah_snap_path, b"dummy").unwrap();
+
         let relay = ChainArtifact {
             cmd: "doppelganger".into(),
             chain: "polkadot".into(),
-            spec_path: "/home/ubuntu/something.json".into(),
-            snap_path: "/home/ubuntu/something.tgz".into(),
+            spec_path: relay_spec_path.into(),
+            snap_path: relay_snap_path.into(),
             override_wasm: None,
+            para_id: None,
         };
         let ah = ChainArtifact {
             cmd: "doppelganger-parachain".into(),
             chain: "ah-polkadot".into(),
-            spec_path: "/home/ubuntu/something-ah.json".into(),
-            snap_path: "/home/ubuntu/something-ah.tgz".into(),
+            spec_path: ah_spec_path.into(),
+            snap_path: ah_snap_path.into(),
             override_wasm: None,
+            para_id: Some(1000),
         };
 
         let network_config = generate_config(relay, vec![ah], None, "rocksdb")
@@ -913,7 +983,6 @@ mod test {
             .unwrap();
 
         let toml = network_config.dump_to_toml().unwrap();
-        println!("{toml}");
         assert!(toml.contains("--db-cache=24000"));
     }
 }

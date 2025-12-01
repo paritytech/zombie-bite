@@ -1,0 +1,13 @@
+# Zombie Bite Configuration - Asset Hub Only
+# This is the minimal configuration for Asset Hub (default behavior)
+
+# Optional global settings
+and_spawn = false
+with_monitor = true
+
+[relaychain]
+network = "polkadot"
+
+[[parachains]]
+type = "asset-hub"
+enabled = true

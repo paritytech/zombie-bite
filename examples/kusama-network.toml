@@ -1,0 +1,27 @@
+# Zombie Bite Configuration - Kusama Network
+# Configuration for running on Kusama with selected parachains
+
+# Global settings
+base_path = "/tmp/kusama-bite"
+and_spawn = true
+with_monitor = true
+
+[relaychain]
+network = "kusama"
+sync_url = "wss://kusama-rpc.dwellir.com"
+
+[[parachains]]
+type = "asset-hub"
+enabled = true
+
+[[parachains]]
+type = "bridge-hub"
+enabled = true
+
+[[parachains]]
+type = "coretime"
+enabled = false
+
+[[parachains]]
+type = "people"
+enabled = false
