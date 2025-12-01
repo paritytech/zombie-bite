@@ -42,6 +42,9 @@ pub enum Commands {
         /// Automatically spawn the 'bited' network
         #[arg(long, short = 'm', default_value_t = false, verbatim_doc_comment)]
         and_spawn: bool,
+        /// Monit the progress of the chains, and restart the nodes if the block production stall
+        #[arg(long, default_value_t = false, verbatim_doc_comment)]
+        with_monitor: bool,
         /// Db to use
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["rocksdb", "paritydb"]), default_value="rocksdb", verbatim_doc_comment)]
         database: String,
@@ -54,7 +57,7 @@ pub enum Commands {
         #[arg(long, short = 'd', verbatim_doc_comment)]
         base_path: Option<String>,
         /// Monit the progress of the chains, and restart the nodes if the block prodution stall
-        #[arg(long, short = 'm', default_value_t = true, verbatim_doc_comment)]
+        #[arg(long, short = 'm', default_value_t = false, verbatim_doc_comment)]
         with_monitor: bool,
         /// The network will be using for bite (will try the network + ah)
         #[arg(short = 's', value_parser = clap::builder::PossibleValuesParser::new(["spawn", "post", "after"]), default_value="spawn")]
