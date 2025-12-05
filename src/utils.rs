@@ -166,7 +166,7 @@ pub fn generate_collator_key_from_seed(seed: &str, key_type: &str) -> String {
 /// Generate Session.NextKeys injects for a collator
 /// Returns a JSON object with storage keys mapped to the collator's session keys
 /// The hash is calculated from the collator key bytes
-pub fn generate_collator_next_keys_injects(_seed: &str, collator_key: &str) -> serde_json::Value {
+pub fn generate_collator_next_keys_injects(collator_key: &str) -> serde_json::Value {
     // Hash the collator key bytes for the storage key prefix
     let key_bytes = hex::decode(collator_key).expect("collator key should be valid hex");
     let stash_hash = array_bytes::bytes2hex("", &subhasher::twox64_concat(&key_bytes)[..8]);
@@ -307,19 +307,12 @@ pub fn para_head_key(para_id: u32) -> String {
     const PARAS_HEAD_PREFIX: &str =
         "0xcd710b30bd2eab0352ddcc26417aa1941b3c252fcb29d88eff4f3de5de4476c3";
     // let para_id: ParaId = para_id.into();
-    let para_id_hash = para_id_hash(para_id);
+    let para_id_hash = para_id_for_map_hash(para_id);
     format!("{PARAS_HEAD_PREFIX}{para_id_hash}")
-    // subhasher::twox64_concat(&para_id.encode());
-    // let key = format!(
-    //     "{PARAS_HEAD_PREFIX}{}",
-    //     array_bytes::bytes2hex("", &para_id_hash)
-    // );
-
-    // key
 }
 
 /// Returns the hash of the ParaId (without the 0x prefix)
-pub fn para_id_hash(para_id: u32) -> String {
+pub fn para_id_for_map_hash(para_id: u32) -> String {
     let para_id: ParaId = para_id.into();
     let para_id_hash = subhasher::twox64_concat(para_id.encode());
     array_bytes::bytes2hex("", &para_id_hash)
@@ -430,11 +423,26 @@ pub async fn get_header_from_block(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    #[test]
+    fn para_id() {
+        let para_id = ParaId(1000_u32);
+        println!("{}", array_bytes::bytes2hex("", para_id.encode()));
+
+        let para_id_bytes = 1000_u32.to_le_bytes();
+        let para_id_hex = array_bytes::bytes2hex("", para_id_bytes);
+        assert_eq!(&para_id_hex, "e8030000");
+    }
+
     #[test]
     fn para_head_key_should_work() {
         let para_id = 1000_u32;
         let head_key = para_head_key(para_id);
         assert_eq!(&head_key, "0xcd710b30bd2eab0352ddcc26417aa1941b3c252fcb29d88eff4f3de5de4476c3b6ff6f7d467b87a9e8030000");
+
+        let para_id_bytes = 1000_u32.to_le_bytes();
+        let para_id_hex = array_bytes::bytes2hex("", para_id_bytes);
+        assert_eq!(&para_id_hex, "0xcd710b30bd2eab0352ddcc26417aa1941b3c252fcb29d88eff4f3de5de4476c3b6ff6f7d467b87a9e8030000");
     }
 
     #[tokio::test]
@@ -447,18 +455,26 @@ mod test {
 
     #[test]
     fn encode_u32() {
-        let one = 29798496_u32;
-        let encoded = one.encode();
+        let val = 2_u32;
+        let encoded = val.encode();
+        println!("{}", array_bytes::bytes2hex("0x", encoded));
+    }
+
+    #[test]
+    fn encode_u8() {
+        let val = 11_u8;
+        let encoded = val.encode();
         println!("{}", array_bytes::bytes2hex("0x", encoded));
     }
 
     #[test]
     fn block() {
-        let z = Bl(29798496).encode();
-        println!("{}", array_bytes::bytes2hex("0x", &z));
+        let block = Bl(29798496).encode();
+        println!("{}", array_bytes::bytes2hex("0x", &block));
 
-        let d = Bl::decode(&mut z.as_slice());
-        println!("{:?}", d);
+        let decoded = Bl::decode(&mut block.as_slice()).unwrap();
+        println!("{:?}", decoded);
+        assert_eq!(Bl(29798496), decoded);
     }
 
     #[tokio::test]
@@ -521,7 +537,7 @@ mod test {
     async fn test_generate_collator_injects_for_polkadot() {
         // Test Polkadot (ed25519)
         let polkadot_key = generate_collator_key_from_seed("Collator", "ed");
-        let injects = generate_collator_next_keys_injects("Collator", &polkadot_key);
+        let injects = generate_collator_next_keys_injects(&polkadot_key);
 
         // Expected key for Polkadot with "Collator" seed (ed25519)
         assert_eq!(
@@ -554,7 +570,7 @@ mod test {
     async fn test_generate_collator_injects_for_kusama() {
         // Test Kusama (sr25519)
         let kusama_key = generate_collator_key_from_seed("Collator", "sr");
-        let injects = generate_collator_next_keys_injects("Collator", &kusama_key);
+        let injects = generate_collator_next_keys_injects(&kusama_key);
 
         // Expected key for Kusama with "Collator" seed
         assert_eq!(

@@ -7,12 +7,12 @@ use crate::{
     config::{Parachain, Relaychain},
     utils::{
         generate_collator_key_from_seed, generate_collator_next_keys_injects, get_validator_keys,
-        ValidationCode,
+        ParaId, ValidationCode,
     },
 };
 
 /// Generate the injects for Session.NextKeys storage overrides for validators
-pub fn generate_next_keys_injects(
+fn generate_next_keys_injects(
     validator_keys: &[&crate::utils::ValidatorKeys],
 ) -> serde_json::Value {
     let mut next_keys_injects = serde_json::json!({});
@@ -29,11 +29,15 @@ pub fn generate_next_keys_injects(
 }
 
 /// Generate the storage overrides for relay chain validators
-pub fn generate_validator_overrides(
+pub fn generate_rc_overrides(
     validator_keys: &[&crate::utils::ValidatorKeys],
     paras: &[&Parachain],
 ) -> serde_json::Value {
     let num_validators = validator_keys.len();
+    let num_cores: u32 = paras
+        .len()
+        .try_into()
+        .expect("The number of paras needs to fit into a u32.");
 
     // Build stash list for validators (concatenated hex)
     let stash_list: String = validator_keys
@@ -92,15 +96,9 @@ pub fn generate_validator_overrides(
     // Format validator count as compact encoded
     let validator_count_hex = format!("{:02x}", num_validators * 4); // *4 because we encode each as 4 bytes
 
-    let first_para_id = paras.first().map(|p| p.id()).unwrap_or(1000);
-    let para_id_bytes = first_para_id.to_le_bytes();
-    let para_id_hex = array_bytes::bytes2hex("", para_id_bytes);
-
-    // Build core descriptor for the first parachain
-    let core_descriptor = format!("00010402{}00e100e100010000e1", para_id_hex);
-
-    // Build paras parachains list (just the first para)
-    let paras_parachains = format!("04{}", para_id_hex);
+    // Generate paras_parachains
+    let para_ids: Vec<u32> = paras.iter().map(|para| para.id()).collect();
+    let paras_parachains = generate_paras_parachains_value(para_ids);
 
     // Build base overrides object
     let mut overrides = json!({
@@ -132,10 +130,9 @@ pub fn generate_validator_overrides(
         "2099d7f109d6e535fb000bba623fd4409f99a2ce711f3a31b2fc05604c93f179": format!("{}{}", validator_count_hex, authority_discovery_keys),
         // authorityDiscovery nextKeys (dynamic)
         "2099d7f109d6e535fb000bba623fd4404c014e6bf8b8c2c011e7290b85696bb3": format!("{}{}", validator_count_hex, authority_discovery_keys),
-        // Core descriptor, ensure core 0 is assigned to first parachain (dynamic)
-        "638595eebaa445ce03a13547bece90e704e6ac775a3245623103ffec2cb2c92fb4def25cfda6ef3ac02a707a7013b12ddc9c5f6a3e1994c51754be175bd6a3d4": core_descriptor,
-        // Configuration activeConfig
-        "06de3d8a54d27e44a9d5ce189618f22db4b49d95320d9021994c850f25b8e385": "0000300000500000aaaa020000001000fbff0000100000000a000000403800005802000003000000020000000000500000c800008000000000e8764817000000000000000000000000e87648170000000000000000000000e80300000090010080000000009001000c01002000000600c4090000000000000601983a00000000000040380000000600000058020000030000001900000000000000020000000200000002000000140000000100000008030100000014000000040000000105000000010000000100000000000000f401000080b2e60e80c3c90180b2e60e00000000000000000000000005000000",
+        // Configuration activeConfig, {x} cores and node_features [1101]
+        "06de3d8a54d27e44a9d5ce189618f22db4b49d95320d9021994c850f25b8e385": format!("0000300000500000aaaa020000001000fbff0000100000000a000000403800005802000003000000020000000000500000c800008000000000e8764817000000000000000000000000e87648170000000000000000000000e80300000090010080000000009001000c01002000000600c4090000000000000601983a000000000000403800000006000000580200000300000019000000000000000200000002000000020000001400000001000000100b010000001400000004000000010500000001000000{}00000000f401000080b2e60e80c3c90180b2e60e00000000000000000000000005000000", array_bytes::bytes2hex("", num_cores.encode())),
+        // TODO: is this needed?
         // paraScheduler availabilityCores (1 core, free)
         "94eadf0156a8ad5156507773d0471e4ab8ebad86f546c7e0b135a4212aace339": "0400",
         // Sudo Key (Alice)
@@ -143,24 +140,42 @@ pub fn generate_validator_overrides(
     });
 
     // Add DMP and HRMP storage keys for each parachain
-    for para in paras {
-        let para_id_bytes = para.id().to_le_bytes();
-        let para_id_hex = array_bytes::bytes2hex("", para_id_bytes);
+    let dmp_dmqh_prefix = array_bytes::bytes2hex(
+        "",
+        substorager::storage_value_key(&b"Dmp"[..], b"DownwardMessageQueueHeads"),
+    );
+    let hrmp_hici_prefix = array_bytes::bytes2hex(
+        "",
+        substorager::storage_value_key(&b"Hrmp"[..], b"HrmpIngressChannelsIndex"),
+    );
+    let core_descriptor_prefix = array_bytes::bytes2hex(
+        "",
+        substorager::storage_value_key(&b"CoretimeAssignmentProvider"[..], b"CoreDescriptors"),
+    );
+    for (index, para) in paras.iter().enumerate() {
+        let index: u32 = index.try_into().expect("Index should be valid u32");
+        let para_id = ParaId(para.id());
+
+        let para_twox64 = array_bytes::bytes2hex("", subhasher::twox64(para_id.encode()));
+        let para_hex = array_bytes::bytes2hex("", para_id.encode());
+        let para_key_part = format!("{para_twox64}{para_hex}");
 
         // DMP downwardMessageQueueHeads (empty for each para)
-        let dmp_queue_key = format!(
-            "63f78c98723ddc9073523ef3beefda0c4d7fefc408aac59dbfe80a72ac8e3ce5b6ff6f7d467b87a9{}",
-            para_id_hex
-        );
+        let dmp_queue_key = format!("{dmp_dmqh_prefix}{para_key_part}");
         overrides[dmp_queue_key] =
             json!("0000000000000000000000000000000000000000000000000000000000000000");
 
         // HRMP hrmpIngressChannelsIndex (empty for each para)
-        let hrmp_channels_key = format!(
-            "6a0da05ca59913bc38a8630590f2627c1d3719f5b0b12c7105c073c507445948b6ff6f7d467b87a9{}",
-            para_id_hex
-        );
+        let hrmp_channels_key = format!("{hrmp_hici_prefix}{para_key_part}");
         overrides[hrmp_channels_key] = json!("00");
+
+        // CoretimeAssignmentProvider CoreDescriptors <idx>
+        let core_descriptor_idx_key = format!(
+            "{core_descriptor_prefix}{}",
+            array_bytes::bytes2hex("", subhasher::twox256(index.to_le_bytes()))
+        );
+        let core_descriptor = format!("00010402{}00e100e100010000e1", para_hex);
+        overrides[core_descriptor_idx_key] = json!(core_descriptor);
     }
 
     overrides
@@ -177,9 +192,9 @@ pub async fn generate_default_overrides_for_rc(
 
     let next_keys_injects = generate_next_keys_injects(&validator_keys);
 
-    // Generate the validator overrides with parachains
+    // Generate the rc overrides with parachains
     let paras_refs: Vec<&Parachain> = paras.iter().collect();
-    let mut overrides = generate_validator_overrides(&validator_keys, &paras_refs);
+    let mut overrides = generate_rc_overrides(&validator_keys, &paras_refs);
 
     // Keys to inject (mostly storage maps that are not present in the current state)
     // <Pallet> < Item>
@@ -216,13 +231,13 @@ pub async fn generate_default_overrides_for_rc(
             let code_hash = hex::encode(subhasher::blake2_256(&wasm_content[..]));
 
             // we should now override
-            let para_id_hash = crate::utils::para_id_hash(para.id());
+            let para_id_map_key = crate::utils::para_id_for_map_hash(para.id());
             // Paras.CurrentCodeHash(paraId)
             let current_code_hash_prefix = array_bytes::bytes2hex(
                 "",
                 substorager::storage_value_key(&b"Paras"[..], b"CurrentCodeHash"),
             );
-            overrides[&format!("{current_code_hash_prefix}{para_id_hash}")] =
+            overrides[&format!("{current_code_hash_prefix}{para_id_map_key}")] =
                 Value::String(code_hash.clone());
 
             // Paras.CodeByHash (should be injected since is have a reference to hash of the code itself)
@@ -264,10 +279,10 @@ pub async fn generate_default_overrides_for_para(
     para: &Parachain,
     relay: &Relaychain,
 ) -> PathBuf {
-    // Determine key type based on relay chain: ed25519 for Polkadot, sr25519 for others
-    let key_type = match relay {
-        Relaychain::Polkadot { .. } => "ed",
-        _ => "sr", // Kusama, Paseo, etc.
+    // For AH determine key type based on relay chain: ed25519 for Polkadot, sr25519 for others
+    let key_type = match (relay, para) {
+        (Relaychain::Polkadot { .. }, Parachain::AssetHub { .. }) => "ed",
+        _ => "sr",
     };
 
     // Generate collator key using "Collator-{para_id}" as seed
@@ -275,7 +290,7 @@ pub async fn generate_default_overrides_for_para(
     let key_to_use = generate_collator_key_from_seed(&seed, key_type);
 
     // Generate the injects using the helper function
-    let injects = generate_collator_next_keys_injects(&seed, &key_to_use);
+    let injects = generate_collator_next_keys_injects(&key_to_use);
 
     // <Pallet> <Item>
     // e.g Validator Validators
@@ -316,15 +331,28 @@ pub async fn generate_default_overrides_for_para(
     file_path
 }
 
+fn generate_paras_parachains_value(ids: impl Into<Vec<u32>>) -> String {
+    let para_ids = ids.into();
+    let para_ids: Vec<ParaId> = para_ids.iter().map(|id| ParaId(*id)).collect();
+    let paras_parachains = array_bytes::bytes2hex("", para_ids.encode());
+    paras_parachains
+}
+
 #[cfg(test)]
 mod test {
+    use codec::Encode;
     use serde_json::json;
 
-    use crate::utils::get_validator_keys;
+    use crate::utils::{get_validator_keys, ParaId};
 
-    use super::{
-        generate_default_overrides_for_rc, generate_next_keys_injects, generate_validator_overrides,
-    };
+    use super::*;
+
+    #[test]
+    fn generate_paras_parachains_value_works() {
+        let value = generate_paras_parachains_value([1000_u32]);
+        println!("{value}");
+        assert_eq!(value, "04e8030000");
+    }
 
     #[tokio::test]
     async fn overrides_rc() {
@@ -380,7 +408,7 @@ mod test {
         let validator_keys = get_validator_keys(2);
         let para = crate::config::Parachain::new("asset-hub");
         let paras = vec![&para];
-        let overrides = generate_validator_overrides(&validator_keys, &paras);
+        let overrides = generate_rc_overrides(&validator_keys, &paras);
 
         // Validator Validators
         assert_eq!(
@@ -435,5 +463,45 @@ mod test {
             overrides["5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b"],
             "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
         );
+    }
+
+    #[test]
+    fn encode_dmq() {
+        let dmp_dmqh_prefix = array_bytes::bytes2hex(
+            "",
+            substorager::storage_value_key(&b"Dmp"[..], b"DownwardMessageQueueHeads"),
+        );
+
+        println!("Dmp_DownwardMessageQueueHeads {dmp_dmqh_prefix}");
+
+        let para_id = ParaId(1005);
+
+        let para_twox64 = array_bytes::bytes2hex("", subhasher::twox64(para_id.encode()));
+        let para_hex = array_bytes::bytes2hex("", para_id.encode());
+
+        println!("Dmp_DownwardMessageQueueHeads_1005 {dmp_dmqh_prefix}{para_twox64}{para_hex}");
+    }
+
+    #[test]
+    fn encode_hrmp() {
+        let hrmp_prefix = array_bytes::bytes2hex(
+            "",
+            substorager::storage_value_key(&b"Hrmp"[..], b"HrmpIngressChannelsIndex"),
+        );
+        println!("Hrmp_HrmpIngressChannelsIndex {hrmp_prefix}");
+    }
+
+    #[test]
+    fn core_descriptor() {
+        let prefix = array_bytes::bytes2hex(
+            "",
+            substorager::storage_value_key(&b"CoretimeAssignmentProvider"[..], b"CoreDescriptors"),
+        );
+        println!("p {prefix}");
+        let core_0_descriptor_idx_key = format!(
+            "{prefix}{}",
+            array_bytes::bytes2hex("", subhasher::twox256(0_u32.to_le_bytes()))
+        );
+        println!("is: {core_0_descriptor_idx_key}");
     }
 }
