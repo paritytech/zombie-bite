@@ -111,8 +111,8 @@ pub async fn doppelganger_inner(
             sync_para(
                 ns.clone(),
                 "doppelganger-parachain",
-                para.as_chain_string(&relay_chain.as_chain_string()),
-                relay_chain.as_chain_string(),
+                &para,
+                &relay_chain,
                 relay_chain.sync_endpoint(),
                 para_default_overrides_path,
                 info_path,
@@ -943,10 +943,13 @@ mod test {
 
     #[tokio::test]
     async fn test_generate_config() {
-        std::env::set_var(
-            "ZOMBIE_BITE_AH_EXTRA_ARGS",
-            "--db-cache=24000, --trie-cache-size=24000, --runtime-cache-size=255",
-        );
+        // test extra args in env
+        unsafe {
+            std::env::set_var(
+                "ZOMBIE_BITE_AH_EXTRA_ARGS",
+                "--db-cache=24000, --trie-cache-size=24000, --runtime-cache-size=255",
+            );
+        }
 
         // Create dummy chain spec and snapshot files
         let relay_spec_path = "/tmp/test-something.json";

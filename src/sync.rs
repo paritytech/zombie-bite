@@ -7,7 +7,7 @@ use std::{
     time::Duration,
 };
 
-use crate::config::get_state_pruning_config;
+use crate::config::{get_state_pruning_config, Parachain, Relaychain};
 use crate::utils::get_random_port;
 
 use reqwest::Url;
@@ -96,24 +96,26 @@ pub async fn sync_relay_only(
 pub async fn sync_para(
     ns: DynNamespace,
     cmd: impl AsRef<str>,
-    chain: impl AsRef<str>,
-    relaychain: impl AsRef<str>,
+    parachain: &Parachain,
+    relaychain: &Relaychain,
     relaychain_endpoint: impl AsRef<str>,
     overrides_path: PathBuf,
     info_path: impl AsRef<str>,
     maybe_target_header: Option<String>,
     database: &str,
 ) -> Result<(DynNode, String, String, String), ()> {
+    let chain = parachain.as_chain_string(&relaychain.as_chain_string());
+    let para_id_str = parachain.id().to_string();
     let sync_db_path = format!(
         "{}/paras/{}/sync-db",
         ns.base_dir().to_string_lossy(),
-        chain.as_ref()
+        &chain,
     );
 
     let para_head_path = format!(
         "{}/paras/{}/head.txt",
         ns.base_dir().to_string_lossy(),
-        chain.as_ref()
+        &chain,
     );
 
     let rpc_random_port = get_random_port().await;
@@ -133,11 +135,12 @@ pub async fn sync_para(
     env.push(("ZOMBIE_PARA_HEAD_PATH", &para_head_path));
     env.push(("RUST_LOG", "doppelganger=debug"));
     env.push(("ZOMBIE_INFO_PATH", info_path.as_ref()));
+    env.push(("ZOMBIE_PARA_ID", &para_id_str));
 
     trace!("env: {env:?}");
 
     let dest_for_paseo = format!("{}/asset-hub-paseo.json", ns.base_dir().to_string_lossy(),);
-    let chain_arg = if chain.as_ref() == "asset-hub-paseo" {
+    let chain_arg = if chain == "asset-hub-paseo" {
         // get chain spec from https://paseo-r2.zondax.ch/chain-specs/paseo-asset-hub.json
         let response = reqwest::get(PASEO_ASSET_HUB_SPEC_URL)
             .await
@@ -151,11 +154,10 @@ pub async fn sync_para(
         chain.as_ref()
     };
 
-    let unique_node_name = format!("sync-node-para-{}", chain.as_ref().replace("-", "_"));
+    let unique_node_name = format!("sync-node-para-{}", chain.replace("-", "_"));
     info!(
         "🔄 Starting sync for parachain: {} with unique node name: {}",
-        chain.as_ref(),
-        unique_node_name
+        chain, unique_node_name
     );
 
     let opts = SpawnNodeOptions::new(unique_node_name.as_str(), cmd.as_ref())
@@ -180,7 +182,7 @@ pub async fn sync_para(
             database,
             "--",
             "--chain",
-            relaychain.as_ref(),
+            relaychain.as_chain_string().as_ref(),
         ])
         .env(env);
 
@@ -195,9 +197,9 @@ pub async fn sync_para(
     let url = reqwest::Url::try_from(metrics_url.as_str()).unwrap();
 
     match wait_sync(url).await {
-        Ok(_) => info!("✅ Synced (chain: {}), stopping node.", chain.as_ref()),
+        Ok(_) => info!("✅ Synced (chain: {}), stopping node.", chain),
         Err(e) => {
-            error!("❌ Sync failed for parachain {}: {}", chain.as_ref(), e);
+            error!("❌ Sync failed for parachain {}: {}", chain, e);
             return Err(());
         }
     }

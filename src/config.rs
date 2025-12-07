@@ -127,7 +127,7 @@ type MaybeWasmOverridePath = Option<String>;
 type MaybeSyncUrl = Option<String>;
 type MaybeByteAt = Option<u32>;
 
-#[derive(Debug, PartialEq)]
+#[derive(Debug, PartialEq, Clone)]
 pub enum Relaychain {
     Polkadot {
         maybe_override: MaybeWasmOverridePath,
