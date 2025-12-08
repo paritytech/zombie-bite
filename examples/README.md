@@ -18,10 +18,7 @@ Zombie Bite now supports configuration files to simplify the management of syste
 zombie-bite bite --config examples/all-system-chains.toml
 
 # Override specific values from CLI (CLI takes precedence)
-zombie-bite bite --config examples/kusama-network.toml --relay polkadot
-
-# Mix config file with CLI overrides
-zombie-bite bite --config examples/asset-hub-only.toml --parachains asset-hub,coretime,people
+zombie-bite bite --config examples/kusama-network.toml --rc polkadot
 ```
 
 ### Basic Structure

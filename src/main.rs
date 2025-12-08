@@ -52,21 +52,18 @@ async fn resolve_if_dir_exist(base_path: &Path, step: Step) {
 }
 
 async fn ensure_startup_producing_blocks(network: &Network<LocalFileSystem>) {
-    // first wait until the collator replies with metrics
+    // Only run collator metric logic if there is at least one parachain
     let parachains = network.parachains();
-    let para = parachains
-        .first()
-        .expect("At least one parachain should exist");
-    let collators = para.collators();
-    let collator = collators
-        .first()
-        .expect("At least one collator should exist");
-    debug!("Waiting metrics for collator {}", collator.name());
-
-    collator
-        .wait_metric_with_timeout("node_roles", |x| x > 1.0, 300_u64)
-        .await
-        .unwrap();
+    if let Some(para) = parachains.first() {
+        let collators = para.collators();
+        if let Some(collator) = collators.first() {
+            debug!("Waiting metrics for collator {}", collator.name());
+            collator
+                .wait_metric_with_timeout("node_roles", |x| x > 1.0, 300_u64)
+                .await
+                .unwrap();
+        }
+    }
 
     // ensure block production
     let client = network
@@ -157,9 +154,6 @@ async fn main() -> Result<(), anyhow::Error> {
             relay,
             relay_runtime,
             relay_bite_at,
-            ah_runtime,
-            parachains,
-            ah_bite_at,
             base_path,
             rc_sync_url,
             and_spawn,
@@ -176,9 +170,6 @@ async fn main() -> Result<(), anyhow::Error> {
                 relay,
                 relay_runtime,
                 relay_bite_at,
-                ah_runtime,
-                ah_bite_at,
-                parachains,
                 base_path,
                 rc_sync_url,
                 and_spawn,

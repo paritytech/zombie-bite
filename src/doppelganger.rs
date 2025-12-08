@@ -111,7 +111,7 @@ pub async fn doppelganger_inner(
             sync_para(
                 ns.clone(),
                 "doppelganger-parachain",
-                &para,
+                para,
                 &relay_chain,
                 relay_chain.sync_endpoint(),
                 para_default_overrides_path,
