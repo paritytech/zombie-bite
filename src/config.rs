@@ -211,16 +211,16 @@ impl Relaychain {
     // TODO: make this endpoints configurables
     pub fn sync_endpoint(&self) -> String {
         String::from(match self {
-            Relaychain::Polkadot { .. } => "wss://polkadot-rpc.dwellir.com",
-            Relaychain::Kusama { .. } => "wss://kusama-rpc.dwellir.com",
+            Relaychain::Polkadot { .. } => "wss://polkadot-rpc.n.dwellir.com",
+            Relaychain::Kusama { .. } => "wss://kusama-rpc.n.dwellir.com",
             Relaychain::Paseo { .. } => "wss://paseo-rpc.dwellir.com",
         })
     }
 
     pub fn rpc_endpoint(&self) -> String {
         String::from(match self {
-            Relaychain::Polkadot { .. } => "wss://polkadot-rpc.dwellir.com",
-            Relaychain::Kusama { .. } => "wss://kusama-rpc.dwellir.com",
+            Relaychain::Polkadot { .. } => "wss://polkadot-rpc.n.dwellir.com",
+            Relaychain::Kusama { .. } => "wss://kusama-rpc.n.dwellir.com",
             Relaychain::Paseo { .. } => "wss://paseo-rpc.dwellir.com",
         })
     }
