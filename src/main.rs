@@ -5,7 +5,7 @@ use std::{
 
 use clap::Parser;
 use futures::StreamExt;
-use tracing::{debug, info, level_filters::LevelFilter, trace, warn};
+use tracing::{debug, error, info, level_filters::LevelFilter, trace, warn};
 use tracing_subscriber::EnvFilter;
 use zombienet_sdk::{LocalFileSystem, Network};
 
@@ -147,8 +147,14 @@ async fn main() -> Result<(), anyhow::Error> {
             base_path,
             rc_sync_url,
             and_spawn,
+            with_monitor,
             database,
         } => {
+            if with_monitor && !and_spawn {
+                error!("--with-monitor can only be used with --and-spawn");
+                std::process::exit(1);
+            }
+
             let relaychain =
                 Relaychain::new_with_values(&relay, relay_runtime, rc_sync_url, relay_bite_at);
             debug!("{:?}", relaychain);
@@ -179,7 +185,7 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 ensure_startup_producing_blocks(&network).await;
 
-                post_spawn_loop(&stop_file, &network, true).await?;
+                post_spawn_loop(&stop_file, &network, with_monitor).await?;
 
                 tear_down_and_generate(&stop_file, step, network, base_path).await?;
             }

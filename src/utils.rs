@@ -218,23 +218,36 @@ pub async fn localize_config(config_path: impl AsRef<str>) -> Result<(), anyhow:
 #[derive(Serialize, Deserialize, Debug)]
 struct GetBlockHashRpcResponse {
     id: u32,
-    result: String // result contains only the hash
+    result: String, // result contains only the hash
 }
 
 #[derive(Serialize, Deserialize, Debug)]
 struct GetHeaderRpcResponse {
     id: u32,
-    result: serde_json::Value // result contains an Object with the header
+    result: serde_json::Value, // result contains an Object with the header
 }
 
-pub async fn get_header_from_block(block_number: u32, endpoint: &str) -> Result<serde_json::Value, anyhow::Error> {
+pub async fn get_header_from_block(
+    block_number: u32,
+    endpoint: &str,
+) -> Result<serde_json::Value, anyhow::Error> {
     let client = reqwest::ClientBuilder::new().build().unwrap();
 
-    let res = client.post(endpoint).json(&json!({"method":"chain_getBlockHash","params":[block_number],"id":1,"jsonrpc":"2.0"})).send().await?;
+    let res = client
+        .post(endpoint)
+        .json(
+            &json!({"method":"chain_getBlockHash","params":[block_number],"id":1,"jsonrpc":"2.0"}),
+        )
+        .send()
+        .await?;
     let hash = res.json::<GetBlockHashRpcResponse>().await?.result;
     trace!("block: {block_number} -> hash: {}", hash);
 
-    let res = client.post(endpoint).json(&json!({"method":"chain_getHeader","params":[hash],"id":1,"jsonrpc":"2.0"})).send().await?;
+    let res = client
+        .post(endpoint)
+        .json(&json!({"method":"chain_getHeader","params":[hash],"id":1,"jsonrpc":"2.0"}))
+        .send()
+        .await?;
     let header = res.json::<GetHeaderRpcResponse>().await?.result;
     trace!("hash: {} -> header: {:?}", hash, header);
 
