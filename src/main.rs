@@ -5,7 +5,7 @@ use std::{
 
 use clap::Parser;
 use futures::StreamExt;
-use tracing::{debug, info, level_filters::LevelFilter, trace, warn};
+use tracing::{debug, error, info, level_filters::LevelFilter, trace, warn};
 use tracing_subscriber::EnvFilter;
 use zombienet_sdk::{LocalFileSystem, Network, NetworkNode};
 
@@ -163,8 +163,14 @@ async fn main() -> Result<(), anyhow::Error> {
             base_path,
             rc_sync_url,
             and_spawn,
+            with_monitor,
             database,
         } => {
+            if with_monitor && !and_spawn {
+                error!("--with-monitor can only be used with --and-spawn");
+                std::process::exit(1);
+            }
+
             let resolved_config = resolve_bite_config(
                 config,
                 relay,
