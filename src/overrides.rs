@@ -334,8 +334,8 @@ pub async fn generate_default_overrides_for_para(
 fn generate_paras_parachains_value(ids: impl Into<Vec<u32>>) -> String {
     let para_ids = ids.into();
     let para_ids: Vec<ParaId> = para_ids.iter().map(|id| ParaId(*id)).collect();
-    let paras_parachains = array_bytes::bytes2hex("", para_ids.encode());
-    paras_parachains
+
+    array_bytes::bytes2hex("", para_ids.encode())
 }
 
 #[cfg(test)]
