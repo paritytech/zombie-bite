@@ -84,6 +84,9 @@ jobs:
           VALIDATORS=$(jq -r '.relay.nodes[]? | "\(.name):\(.prometheus_uri)"' "$ZOMBIE_JSON")
           COLLATORS=$(jq -r '.parachains[]?[]?.collators[]? | "\(.name):\(.prometheus_uri)"' "$ZOMBIE_JSON")
           
+          echo "Validators: $VALIDATORS"
+          echo "Collators: $COLLATORS"
+          
           MAX_ATTEMPTS=20
           ATTEMPT=0
           declare -A INITIAL_BLOCKS
@@ -99,12 +102,19 @@ jobs:
             for node in $VALIDATORS; do
               NAME=$(echo $node | cut -d: -f1)
               METRICS_URL=$(echo $node | cut -d: -f2-)
-              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}' || echo "0")
+              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}')
+              BLOCK=${BLOCK:-0}
               
-              if [ $ATTEMPT -eq 1 ]; then
-                INITIAL_BLOCKS[$NAME]=$BLOCK
-                echo "$NAME: initial block height $BLOCK"
-              elif [ "$BLOCK" -gt "${INITIAL_BLOCKS[$NAME]}" ]; then
+              # If we haven't set initial block yet, or it was 0, set it now if we have a valid reading
+              if [ -z "${INITIAL_BLOCKS[$NAME]}" ] || [ "${INITIAL_BLOCKS[$NAME]}" -eq 0 ]; then
+                if [ "$BLOCK" -gt 0 ] 2>/dev/null; then
+                  INITIAL_BLOCKS[$NAME]=$BLOCK
+                  echo "$NAME: initial block height $BLOCK"
+                else
+                  echo "$NAME: waiting for metrics... (height: $BLOCK)"
+                  ALL_OK=false
+                fi
+              elif [ "$BLOCK" -gt "${INITIAL_BLOCKS[$NAME]}" ] 2>/dev/null; then
                 echo "$NAME: producing blocks (height: $BLOCK)"
               else
                 echo "$NAME: waiting... (height: $BLOCK)"
@@ -116,12 +126,19 @@ jobs:
             for node in $COLLATORS; do
               NAME=$(echo $node | cut -d: -f1)
               METRICS_URL=$(echo $node | cut -d: -f2-)
-              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}' || echo "0")
+              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}')
+              BLOCK=${BLOCK:-0}
               
-              if [ $ATTEMPT -eq 1 ]; then
-                INITIAL_BLOCKS[$NAME]=$BLOCK
-                echo "$NAME: initial block height $BLOCK"
-              elif [ "$BLOCK" -gt "${INITIAL_BLOCKS[$NAME]}" ] && [ "$BLOCK" -gt "0" ]; then
+              # If we haven't set initial block yet, or it was 0, set it now if we have a valid reading
+              if [ -z "${INITIAL_BLOCKS[$NAME]}" ] || [ "${INITIAL_BLOCKS[$NAME]}" -eq 0 ]; then
+                if [ "$BLOCK" -gt 0 ] 2>/dev/null; then
+                  INITIAL_BLOCKS[$NAME]=$BLOCK
+                  echo "$NAME: initial block height $BLOCK"
+                else
+                  echo "$NAME: waiting for metrics... (height: $BLOCK)"
+                  ALL_OK=false
+                fi
+              elif [ "$BLOCK" -gt "${INITIAL_BLOCKS[$NAME]}" ] 2>/dev/null; then
                 echo "$NAME: producing blocks (height: $BLOCK)"
               else
                 echo "$NAME: waiting... (height: $BLOCK)"
@@ -129,7 +146,7 @@ jobs:
               fi
             done
             
-            if [ "$ALL_OK" = true ] && [ $ATTEMPT -gt 1 ]; then
+            if [ "$ALL_OK" = true ]; then
               echo ""
               echo "All nodes are producing blocks!"
               exit 0
