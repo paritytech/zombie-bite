@@ -168,7 +168,7 @@ pub fn resolve_bite_config(
     } else {
         "polkadot".to_string()
     };
-   
+
     let relaychain = if relay_runtime.is_some() || rc_sync_url.is_some() || relay_bite_at.is_some()
     {
         // CLI args provided, use them
