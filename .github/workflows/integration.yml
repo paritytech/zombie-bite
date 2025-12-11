@@ -54,7 +54,8 @@ jobs:
           target/release/zombie-bite spawn \
             --base-path ${{ github.workspace }}/zombie-bite-output &
           echo $! > spawn.pid
-          sleep 60
+          echo "Waiting for network and Prometheus metrics to be ready..."
+          sleep 90
 
       - name: Check spawn process
         run: |
@@ -86,6 +87,12 @@ jobs:
           
           echo "Validators: $VALIDATORS"
           echo "Collators: $COLLATORS"
+          
+          # Debug: Check what Prometheus returns for alice
+          ALICE_URL=$(echo "$VALIDATORS" | head -1 | cut -d: -f2-)
+          echo "Checking Prometheus for alice at: $ALICE_URL"
+          echo "Sample metrics output:"
+          curl -s "$ALICE_URL" | grep "block_height" | head -5
           
           MAX_ATTEMPTS=20
           ATTEMPT=0
