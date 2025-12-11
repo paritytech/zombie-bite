@@ -80,9 +80,9 @@ jobs:
           
           echo "Monitoring block production (checking every 15s for up to 5 minutes)..."
           
-          # Extract node names and prometheus ports from zombie.json
-          VALIDATORS=$(jq -r '.relay_chain[].validators[] | "\(.name):\(.prometheus_port[0])"' "$ZOMBIE_JSON")
-          COLLATORS=$(jq -r '.parachains[].collators[] | "\(.name):\(.prometheus_port[0])"' "$ZOMBIE_JSON")
+          # Extract node names and prometheus URIs from zombie.json
+          VALIDATORS=$(jq -r '.relay.nodes[]? | "\(.name):\(.prometheus_uri)"' "$ZOMBIE_JSON")
+          COLLATORS=$(jq -r '.parachains[]?[]?.collators[]? | "\(.name):\(.prometheus_uri)"' "$ZOMBIE_JSON")
           
           MAX_ATTEMPTS=20
           ATTEMPT=0
@@ -98,8 +98,8 @@ jobs:
             # Check validators
             for node in $VALIDATORS; do
               NAME=$(echo $node | cut -d: -f1)
-              PORT=$(echo $node | cut -d: -f2)
-              BLOCK=$(curl -s "http://127.0.0.1:${PORT}/metrics" | grep '^block_height{status="best"}' | awk '{print $2}' || echo "0")
+              METRICS_URL=$(echo $node | cut -d: -f2-)
+              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}' || echo "0")
               
               if [ $ATTEMPT -eq 1 ]; then
                 INITIAL_BLOCKS[$NAME]=$BLOCK
@@ -115,8 +115,8 @@ jobs:
             # Check collators
             for node in $COLLATORS; do
               NAME=$(echo $node | cut -d: -f1)
-              PORT=$(echo $node | cut -d: -f2)
-              BLOCK=$(curl -s "http://127.0.0.1:${PORT}/metrics" | grep '^block_height{status="best"}' | awk '{print $2}' || echo "0")
+              METRICS_URL=$(echo $node | cut -d: -f2-)
+              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}' || echo "0")
               
               if [ $ATTEMPT -eq 1 ]; then
                 INITIAL_BLOCKS[$NAME]=$BLOCK
