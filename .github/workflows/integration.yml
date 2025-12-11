@@ -41,7 +41,6 @@ jobs:
       - name: Build zombie-bite
         run: cargo build --release
 
-        # TODO: change people to AH.
       - name: Run bite (polkadot/AH/coretime)
         run: |
           target/release/zombie-bite bite \
@@ -88,12 +87,6 @@ jobs:
           echo "Validators: $VALIDATORS"
           echo "Collators: $COLLATORS"
           
-          # Debug: Check what Prometheus returns for alice
-          ALICE_URL=$(echo "$VALIDATORS" | head -1 | cut -d: -f2-)
-          echo "Checking Prometheus for alice at: $ALICE_URL"
-          echo "Sample metrics output:"
-          curl -s "$ALICE_URL" | grep "block_height" | head -5
-          
           MAX_ATTEMPTS=20
           ATTEMPT=0
           declare -A INITIAL_BLOCKS
@@ -109,7 +102,7 @@ jobs:
             for node in $VALIDATORS; do
               NAME=$(echo $node | cut -d: -f1)
               METRICS_URL=$(echo $node | cut -d: -f2-)
-              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}')
+              BLOCK=$(curl -s "${METRICS_URL}" | grep 'block_height.*status="best"' | awk '{print $2}')
               BLOCK=${BLOCK:-0}
               
               # If we haven't set initial block yet, or it was 0, set it now if we have a valid reading
@@ -117,6 +110,7 @@ jobs:
                 if [ "$BLOCK" -gt 0 ] 2>/dev/null; then
                   INITIAL_BLOCKS[$NAME]=$BLOCK
                   echo "$NAME: initial block height $BLOCK"
+                  ALL_OK=false
                 else
                   echo "$NAME: waiting for metrics... (height: $BLOCK)"
                   ALL_OK=false
@@ -133,7 +127,7 @@ jobs:
             for node in $COLLATORS; do
               NAME=$(echo $node | cut -d: -f1)
               METRICS_URL=$(echo $node | cut -d: -f2-)
-              BLOCK=$(curl -s "${METRICS_URL}" | grep '^block_height{status="best"}' | awk '{print $2}')
+              BLOCK=$(curl -s "${METRICS_URL}" | grep 'block_height.*status="best"' | awk '{print $2}')
               BLOCK=${BLOCK:-0}
               
               # If we haven't set initial block yet, or it was 0, set it now if we have a valid reading
@@ -141,6 +135,7 @@ jobs:
                 if [ "$BLOCK" -gt 0 ] 2>/dev/null; then
                   INITIAL_BLOCKS[$NAME]=$BLOCK
                   echo "$NAME: initial block height $BLOCK"
+                  ALL_OK=false
                 else
                   echo "$NAME: waiting for metrics... (height: $BLOCK)"
                   ALL_OK=false
