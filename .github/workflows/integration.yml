@@ -46,7 +46,7 @@ jobs:
         run: |
           target/release/zombie-bite bite \
             --rc polkadot \
-            --parachains asset-hub,coretime \
+            --parachains people,coretime \
             --base-path ${{ github.workspace }}/zombie-bite-output
 
       - name: Run spawn in background
