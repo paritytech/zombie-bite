@@ -3,6 +3,7 @@ use std::{
     time::Duration,
 };
 
+use anyhow::Context;
 use clap::Parser;
 use futures::StreamExt;
 use tracing::{debug, error, info, level_filters::LevelFilter, trace, warn};
@@ -29,7 +30,7 @@ use crate::config::Step;
 const STOP_FILE: &str = "stop.txt";
 
 /// Helpers fns
-async fn resolve_if_dir_exist(base_path: &Path, step: Step) {
+async fn resolve_if_dir_exist(base_path: &Path, step: Step) -> Result<(), anyhow::Error> {
     let base_path_str = base_path.to_string_lossy();
     let path_to_use = format!("{base_path_str}/{}", step.dir());
     let mut path_with_suffix = format!("{base_path_str}/{}", step.dir());
@@ -45,13 +46,15 @@ async fn resolve_if_dir_exist(base_path: &Path, step: Step) {
     if path_to_use != path_with_suffix {
         // spawn exist and we need to move the content
         warn!("'{}' dir exist, moving to {path_with_suffix}", step.dir());
-        fs::rename(&path_to_use, &path_with_suffix)
-            .await
-            .expect("mv should work");
+        fs::rename(&path_to_use, &path_with_suffix).await?;
     }
+
+    Ok(())
 }
 
-async fn ensure_startup_producing_blocks(network: &Network<LocalFileSystem>) {
+async fn ensure_startup_producing_blocks(
+    network: &Network<LocalFileSystem>,
+) -> Result<(), anyhow::Error> {
     // Check metrics for all parachains and their collators
     let parachains = network.parachains();
     for para in parachains {
@@ -59,25 +62,32 @@ async fn ensure_startup_producing_blocks(network: &Network<LocalFileSystem>) {
             debug!("Waiting metrics for collator {}", collator.name());
             collator
                 .wait_metric_with_timeout("node_roles", |x| x > 1.0, 300_u64)
-                .await
-                .unwrap();
+                .await?;
         }
     }
 
     // ensure block production
     let client = network
         .get_node("alice")
-        .unwrap()
+        .context("Node 'alice' not found")?
         .wait_client::<zombienet_sdk::subxt::PolkadotConfig>()
         .await
-        .unwrap();
-    let mut blocks = client.blocks().subscribe_finalized().await.unwrap().take(3);
+        .map_err(|e| anyhow::anyhow!("Failed to wait for client for 'alice': {e}"))?;
+    let mut blocks = client
+        .blocks()
+        .subscribe_finalized()
+        .await
+        .map_err(|e| anyhow::anyhow!("Failed to subscribe to finalized blocks: {e}"))?
+        .take(3);
 
     while let Some(block) = blocks.next().await {
-        info!("Block #{}", block.unwrap().header().number);
+        let block = block.map_err(|e| anyhow::anyhow!("Failed to get block: {e}"))?;
+        info!("Block #{}", block.header().number);
     }
 
     info!("🚀🚀🚀 network is up and running...");
+
+    Ok(())
 }
 
 async fn post_spawn_loop(
@@ -100,7 +110,7 @@ async fn post_spawn_loop(
             debug!("No collator found, monitoring only validators");
         }
 
-        monit_progress(alice, bob, collator_opt, Some(stop_file)).await;
+        monit_progress(alice, bob, collator_opt, Some(stop_file)).await?;
     } else {
         while let Ok(false) = fs::try_exists(&stop_file).await {
             tokio::time::sleep(Duration::from_secs(60)).await;
@@ -122,12 +132,8 @@ async fn tear_down_and_generate(
 
     if let Ok(true) = teardown_signal {
         // create the artifacts
-        doppelganger::generate_artifacts(base_path.clone(), step, &rc)
-            .await
-            .expect("generate should works");
-        doppelganger::clean_up_dir_for_step(base_path, step, &rc, &[])
-            .await
-            .expect("clean-up should works");
+        doppelganger::generate_artifacts(base_path.clone(), step, &rc).await?;
+        doppelganger::clean_up_dir_for_step(base_path, step, &rc, &[]).await?;
     }
 
     // signal that the teardown is completed
@@ -183,8 +189,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 resolved_config.parachains,
                 &database,
             )
-            .await
-            .expect("bite should work");
+            .await?;
 
             if resolved_config.and_spawn {
                 let step = Step::Spawn;
@@ -194,13 +199,12 @@ async fn main() -> Result<(), anyhow::Error> {
                     resolved_config.base_path.to_string_lossy()
                 );
 
-                resolve_if_dir_exist(&resolved_config.base_path, step).await;
+                resolve_if_dir_exist(&resolved_config.base_path, step).await?;
                 let network =
                     doppelganger::spawn(step, resolved_config.base_path.as_path(), None, None)
-                        .await
-                        .expect("spawn should works");
+                        .await?;
 
-                ensure_startup_producing_blocks(&network).await;
+                ensure_startup_producing_blocks(&network).await?;
 
                 post_spawn_loop(&stop_file, &network, true).await?;
 
@@ -218,24 +222,19 @@ async fn main() -> Result<(), anyhow::Error> {
             let step: Step = step.into();
             let base_path_str = resolved_config.base_path.to_string_lossy();
 
-            if !fs::try_exists(format!("{base_path_str}/{}", step.dir_from()))
-                .await
-                .expect("try_exist should work")
-            {
+            if !fs::try_exists(format!("{base_path_str}/{}", step.dir_from())).await? {
                 println!("\t\x1b[91mThe 'bite' dir doesn't exist, please run the bite subcommand first.\x1b[0m");
                 println!("\tHelp: zombie-bite bite --help");
 
                 std::process::exit(1);
             }
 
-            resolve_if_dir_exist(&resolved_config.base_path, step).await;
+            resolve_if_dir_exist(&resolved_config.base_path, step).await?;
 
             let network =
-                doppelganger::spawn(step, resolved_config.base_path.as_path(), None, None)
-                    .await
-                    .expect("spawn should works");
+                doppelganger::spawn(step, resolved_config.base_path.as_path(), None, None).await?;
 
-            ensure_startup_producing_blocks(&network).await;
+            ensure_startup_producing_blocks(&network).await?;
 
             // STOP file
             let stop_file = format!("{base_path_str}/{STOP_FILE}");
@@ -252,9 +251,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let rc = Relaychain::new(&relay);
             let step: Step = step.into();
             let base_path = get_base_path(base_path);
-            doppelganger::generate_artifacts(base_path, step, &rc)
-                .await
-                .expect("generate artifacts should work")
+            doppelganger::generate_artifacts(base_path, step, &rc).await?
         }
         Commands::CleanUpDir {
             relay,
@@ -264,9 +261,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let rc = Relaychain::new(&relay);
             let step: Step = step.into();
             let base_path = get_base_path(base_path);
-            doppelganger::clean_up_dir_for_step(base_path, step, &rc, &[])
-                .await
-                .expect("clean-up should works");
+            doppelganger::clean_up_dir_for_step(base_path, step, &rc, &[]).await?;
         }
     };
     Ok(())

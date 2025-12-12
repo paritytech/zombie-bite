@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 // TODO: don't allow dead_code
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context as context};
 use futures::future::try_join_all;
 use futures::FutureExt;
 use serde_json::json;
@@ -72,18 +72,15 @@ pub async fn doppelganger_inner(
     let provider = NativeProvider::new(filesystem.clone());
 
     // ensure the base path exist
-    fs::create_dir_all(&global_base_dir).await.unwrap();
+    fs::create_dir_all(&global_base_dir).await?;
 
     // add `/bite` to global base
-    let fixed_base_dir = global_base_dir.canonicalize().unwrap().join("bite");
+    let fixed_base_dir = global_base_dir.canonicalize()?.join("bite");
 
     let base_dir_str = fixed_base_dir.to_string_lossy();
     let ns = provider
         .create_namespace_with_base_dir(fixed_base_dir.as_path())
-        .await
-        .unwrap();
-
-    let _relaychain_rpc_random_port = get_random_port().await;
+        .await?;
 
     // Parachain sync
     let mut syncs = vec![];
@@ -95,13 +92,11 @@ pub async fn doppelganger_inner(
         let maybe_target_header_path = if let Some(at_block) = para.at_block() {
             let para_rpc = para
                 .rpc_endpoint()
-                .expect("rpc for parachain should be set. qed");
+                .context("rpc for parachain should be set. qed")?;
             let header = get_header_from_block(at_block, para_rpc).await?;
 
             let target_header_path = format!("{base_dir_str}/para-header.json");
-            fs::write(&target_header_path, serde_json::to_string_pretty(&header)?)
-                .await
-                .expect("create target head json should works");
+            fs::write(&target_header_path, serde_json::to_string_pretty(&header)?).await?;
             Some(target_header_path)
         } else {
             None
@@ -123,7 +118,9 @@ pub async fn doppelganger_inner(
         );
     }
 
-    let res = try_join_all(syncs).await.unwrap();
+    let res = try_join_all(syncs)
+        .await
+        .map_err(|e| anyhow::anyhow!(format!("Failed to sync: {e:?}")))?;
 
     // loop over paras
     let mut para_artifacts = vec![];
@@ -132,10 +129,12 @@ pub async fn doppelganger_inner(
     for (para_index, (_sync_node, sync_db_path, sync_chain, sync_head_path)) in
         res.into_iter().enumerate()
     {
-        let sync_chain_name = if sync_chain.contains('/') {
-            let parts: Vec<&str> = sync_chain.split('/').collect();
-            let name_parts: Vec<&str> = parts.last().unwrap().split('.').collect();
-            name_parts.first().unwrap().to_string()
+        let sync_chain_name = if let Some(last_part) = sync_chain.rsplit('/').next() {
+            if let Some(first_name) = last_part.split('.').next() {
+                first_name.to_string()
+            } else {
+                return Err(anyhow::anyhow!("Invalid sync_chain: missing name"));
+            }
         } else {
             // is not a file
             sync_chain.clone()
@@ -149,30 +148,36 @@ pub async fn doppelganger_inner(
             &sync_chain,
         )
         .await
-        .unwrap();
+        .map_err(|e| anyhow!("Failed to generate chain spec  {e}"))?;
 
         // generate the data.tgz to use as snapshot
         let snap_path = format!("{}/{}-snap.tgz", &base_dir_str, &sync_chain_name);
         trace!("snap_path: {snap_path}");
-        generate_snap(&sync_db_path, &snap_path).await.unwrap();
-
-        let para_head_str = read_to_string(&sync_head_path)
-            .unwrap_or_else(|_| panic!("read para_head ({sync_head_path}) file should works."));
-        let para_head_hex = if &para_head_str[..2] == "0x" {
-            &para_head_str[2..]
+        generate_snap(&sync_db_path, &snap_path).await?;
+        let para_head_str = read_to_string(&sync_head_path)?;
+        let para_head_hex = if let Some(stripped) = para_head_str.strip_prefix("0x") {
+            stripped
         } else {
             &para_head_str
         };
 
-        let para_head = array_bytes::bytes2hex(
-            "0x",
-            HeadData(hex::decode(para_head_hex).expect("para_head should be a valid hex. qed"))
-                .encode(),
-        );
+        let para_head = match hex::decode(para_head_hex) {
+            Ok(decoded) => {
+                let encoded = HeadData(decoded).encode();
+                array_bytes::bytes2hex("0x", encoded)
+            }
+            Err(e) => {
+                return Err(anyhow::anyhow!(
+                    "para_head should be a valid hex. qed '{}': {}",
+                    para_head_hex,
+                    e
+                ));
+            }
+        };
 
         let para = paras_to
             .get(para_index)
-            .expect("para_index should be valid. qed");
+            .context("para_index should be valid. qed")?;
         para_heads_env.push((
             format!("ZOMBIE_{}", &para_head_key(para.id())[2..]),
             para_head[2..].to_string(),
@@ -201,9 +206,7 @@ pub async fn doppelganger_inner(
         let header = get_header_from_block(at_block, &relay_chain.rpc_endpoint()).await?;
 
         let target_header_path = format!("{base_dir_str}/rc-header.json");
-        fs::write(&target_header_path, serde_json::to_string_pretty(&header)?)
-            .await
-            .expect("create target head json should works");
+        fs::write(&target_header_path, serde_json::to_string_pretty(&header)?).await?;
         Some(target_header_path)
     } else {
         None
@@ -220,10 +223,10 @@ pub async fn doppelganger_inner(
         database,
     )
     .await
-    .unwrap();
+    .map_err(|e| anyhow!("Failed to sync relay: {e:?}"))?;
 
     // stop relay node
-    sync_node.destroy().await.unwrap();
+    sync_node.destroy().await?;
 
     // get the chain-spec (prod) and clean the bootnodes
     // relaychain
@@ -236,7 +239,7 @@ pub async fn doppelganger_inner(
         &sync_chain,
     )
     .await
-    .unwrap();
+    .map_err(|e| anyhow::anyhow!("Failed to generate spec: {e}"))?;
 
     // remove `parachains` db
     let sync_chain_in_path = if sync_chain == "kusama" {
@@ -252,13 +255,11 @@ pub async fn doppelganger_inner(
     };
 
     debug!("Deleting `parachains` db at {parachains_path}");
-    tokio::fs::remove_dir_all(parachains_path)
-        .await
-        .expect("remove parachains db should work");
+    tokio::fs::remove_dir_all(&parachains_path).await?;
 
     // generate the data.tgz to use as snapshot
     let r_snap_path = format!("{}/{}-snap.tgz", &base_dir_str, &sync_chain);
-    generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
+    generate_snap(&sync_db_path, &r_snap_path).await?;
 
     let relay_artifacts = ChainArtifact {
         cmd: context_relay.doppelganger_cmd(),
@@ -276,29 +277,26 @@ pub async fn doppelganger_inner(
         database,
     )
     .await
-    .map_err(|e| anyhow!(e.to_string()))?;
+    .map_err(|e| anyhow!("Failed to generate config: {e}"))?;
+
     // write config in 'bite'
     let config_toml_path = format!("{}/bite/config.toml", global_base_dir.to_string_lossy());
     let toml_config = config.dump_to_toml()?;
-    fs::write(config_toml_path, &toml_config)
-        .await
-        .expect("create config.toml should works");
+    fs::write(&config_toml_path, &toml_config).await?;
 
     // create port and ready files
     let rc_start_block = fs::read_to_string(format!("{base_dir_str}/rc_info.txt"))
-        .await
-        .unwrap()
+        .await?
         .parse::<u64>()
-        .expect("read bite rc block should works");
+        .context("read bite rc block should works")?;
 
     // Collect start blocks for all parachains
     let mut para_start_blocks = serde_json::Map::new();
     for para in &paras_to {
         let para_start_block = fs::read_to_string(format!("{base_dir_str}/para-{}.txt", para.id()))
-            .await
-            .unwrap()
+            .await?
             .parse::<u64>()
-            .unwrap_or_else(|_| panic!("read bite para-{} block should works", para.id()));
+            .map_err(|e| anyhow!("Failed to parse para-{} start block: {e}", para.id()))?;
         para_start_blocks.insert(
             format!("para_{}_start_block", para.id()),
             serde_json::Value::Number(para_start_block.into()),
@@ -320,36 +318,42 @@ pub async fn doppelganger_inner(
         .nodes()
         .into_iter()
         .find(|node| node.name() == "alice")
-        .expect("'alice' should exist");
+        .context("'alice' should exist")?;
 
     // Collect ports for all parachains
     let mut collator_ports = serde_json::Map::new();
     for para_config in config.parachains() {
         if let Some(collator) = para_config.collators().first() {
+            let port = collator.rpc_port().context(format!(
+                "Collator for para {} does not have an RPC port",
+                para_config.id()
+            ))?;
             collator_ports.insert(
                 format!("para_{}_collator_port", para_config.id()),
-                serde_json::Value::Number(collator.rpc_port().unwrap().into()),
+                serde_json::Value::Number(port.into()),
             );
         }
     }
 
     // ports
+    let alice_port = alice_config.rpc_port().context("Alice should have port")?;
     collator_ports.insert(
         "alice_port".to_string(),
-        serde_json::Value::Number(alice_config.rpc_port().unwrap().into()),
+        serde_json::Value::Number(alice_port.into()),
     );
     let ports_content = serde_json::Value::Object(collator_ports);
 
-    let _ = fs::write(
+    fs::write(
         format!("{}/{PORTS_FILE}", global_base_dir.to_string_lossy()),
         ports_content.to_string(),
     )
-    .await;
-    let _ = fs::write(
+    .await?;
+
+    fs::write(
         format!("{}/{READY_FILE}", global_base_dir.to_string_lossy()),
         ready_content.to_string(),
     )
-    .await;
+    .await?;
 
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
@@ -369,7 +373,7 @@ pub async fn generate_artifacts(
 
     // Parse config to get parachain information
     let network_config = zombienet_configuration::NetworkConfig::load_from_toml(&from_config_path)
-        .expect("should be able to load config");
+        .context("should be able to load config")?;
 
     // generate snapshot for alice (rc)
     let alice_data = format!("{global_base_dir_str}/{}/alice/data", step.dir());
@@ -391,9 +395,8 @@ pub async fn generate_artifacts(
     let rc_spec_file = format!("{}-spec.json", rc.as_chain_string());
     let rc_spec_from = format!("{global_base_dir_str}/{}/{rc_spec_file}", step.dir_from());
     let rc_spec_to = format!("{global_base_dir_str}/{}/{rc_spec_file}", step.dir());
-    fs::copy(&rc_spec_from, &rc_spec_to)
-        .await
-        .expect("cp should work");
+    fs::copy(&rc_spec_from, &rc_spec_to).await?;
+
     specs.push(rc_spec_to);
 
     // Generate snapshots and copy chain-specs for all parachains
@@ -422,17 +425,14 @@ pub async fn generate_artifacts(
             para_spec_file
         );
         let para_spec_to = format!("{global_base_dir_str}/{}/{}", step.dir(), para_spec_file);
-        fs::copy(&para_spec_from, &para_spec_to)
-            .await
-            .expect("cp should work");
+        fs::copy(&para_spec_from, &para_spec_to).await?;
+
         specs.push(para_spec_to);
     }
 
     // generate custom config
     let from_config_path = format!("{global_base_dir_str}/{}/config.toml", step.dir_from());
-    let config = fs::read_to_string(&from_config_path)
-        .await
-        .expect("read config file should work");
+    let config = fs::read_to_string(&from_config_path).await?;
     let db_snaps_in_file: Vec<(usize, &str)> = config.match_indices("db_snapshot").collect();
     let needs_to_insert_db = db_snaps_in_file.len() != snaps.len();
     let toml_config = config
@@ -464,9 +464,7 @@ pub async fn generate_artifacts(
 
     // write config in 'dir'
     let config_toml_path = format!("{global_base_dir_str}/{}/config.toml", step.dir());
-    fs::write(config_toml_path, &toml_config)
-        .await
-        .expect("create config.toml should works");
+    fs::write(config_toml_path, &toml_config).await?;
 
     Ok(())
 }
@@ -483,21 +481,15 @@ pub async fn clean_up_dir_for_step(
 
     // if we already have a debug path, remove it
     if let Ok(true) = fs::try_exists(&debug_path).await {
-        fs::remove_dir_all(&debug_path)
-            .await
-            .expect("remove debug dir should works");
+        fs::remove_dir_all(&debug_path).await?;
     }
 
     let step_path = format!("{global_base_dir_str}/{}", step.dir());
-    fs::rename(&step_path, &debug_path)
-        .await
-        .expect("rename dir should works");
+    fs::rename(&step_path, &debug_path).await?;
     info!("renamed dir from {step_path} to {debug_path}");
 
     // create the step dir again
-    fs::create_dir_all(&step_path)
-        .await
-        .expect("Create step dir should works");
+    fs::create_dir_all(&step_path).await?;
     info!("created dir {step_path}");
 
     // Build list of needed files dynamically based on parachains
@@ -526,9 +518,7 @@ pub async fn clean_up_dir_for_step(
         let from = format!("{debug_path}/{file}");
         let to = format!("{step_path}/{file}");
         info!("mv {from} {to}");
-        fs::rename(&from, &to)
-            .await
-            .unwrap_or_else(|e| panic!("Failed to move {from} to {to}: {e}"));
+        fs::rename(&from, &to).await?;
     }
 
     Ok(())
@@ -786,13 +776,13 @@ pub async fn spawn(
         .with_base_dir(&base_dir)
         .with_tear_down_on_failure(false)
         .build()
-        .expect("global settings should work");
+        .map_err(|e| anyhow!("Failed to build global settings: {:?}", e))?;
 
     let network_config = zombienet_configuration::NetworkConfig::load_from_toml_with_settings(
         &config_file,
         &global_settings,
     )
-    .unwrap();
+    .map_err(|e| anyhow!("Failed to load network config from TOML: {e}"))?;
 
     orchestrator
         .spawn(network_config)

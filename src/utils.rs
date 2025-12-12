@@ -4,7 +4,7 @@
 use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
-use anyhow::anyhow;
+use anyhow::{anyhow, Context};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -320,14 +320,14 @@ pub fn para_id_for_map_hash(para_id: u32) -> String {
 
 pub async fn localize_config(config_path: impl AsRef<str>) -> Result<(), anyhow::Error> {
     let config_path = PathBuf::from_str(config_path.as_ref())?;
-    let base_path = config_path.parent().unwrap();
+    let base_path = config_path
+        .parent()
+        .context("config path should have a parent")?;
 
     let mut localized = false;
 
     // read config
-    let config_content = fs::read_to_string(&config_path)
-        .await
-        .expect("read config should works");
+    let config_content = fs::read_to_string(&config_path).await?;
     let mut config_modified = vec![];
     for line in config_content.lines() {
         match line {
@@ -371,11 +371,9 @@ pub async fn localize_config(config_path: impl AsRef<str>) -> Result<(), anyhow:
             &config_path,
             &format!("{}/original-config.toml", &base_path.to_string_lossy()),
         )
-        .await
-        .expect("rename should works");
-        fs::write(&config_path, config_modified.join("\n"))
-            .await
-            .expect("write should works");
+        .await?;
+
+        fs::write(&config_path, config_modified.join("\n")).await?;
     }
 
     Ok(())
