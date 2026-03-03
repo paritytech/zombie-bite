@@ -36,6 +36,8 @@ pub enum Commands {
         #[arg(long = "rc-bite-at", verbatim_doc_comment)]
         relay_bite_at: Option<u32>,
         /// Parachains to include: asset-hub, coretime, people, bridge-hub, collectives (comma-separated)
+        /// For custom parachains use: custom:<para_id>:<rpc_endpoint>:<chain_spec_path>
+        /// Example: custom:3392:wss://kusama-yap-3392.example.com:/path/to/chain-spec.json
         #[arg(long, short = 'p', value_delimiter = ',', verbatim_doc_comment)]
         parachains: Option<Vec<String>>,
         /// Base path to use. if not provided we will check the env 'ZOMBIE_BITE_BASE_PATH' and if not present we will use `<cwd>_timestamp`
@@ -215,10 +217,33 @@ pub fn resolve_bite_config(
                     maybe_bite_at: None,
                     maybe_rpc_endpoint: None,
                 }),
+                s if s.starts_with("custom:") => {
+                    let parts: Vec<&str> = s.splitn(4, ':').collect();
+                    if parts.len() != 4 {
+                        panic!(
+                            "Custom parachain format must be custom:<para_id>:<rpc_endpoint>:<chain_spec_path>, got: {}",
+                            s
+                        );
+                    }
+                    let para_id: u32 = parts[1]
+                        .parse()
+                        .unwrap_or_else(|_| panic!("Invalid para_id '{}' in custom parachain", parts[1]));
+                    let rpc_endpoint = parts[2].to_string();
+                    let chain_spec = parts[3].to_string();
+                    let name = format!("custom-{}", para_id);
+                    Some(Parachain::Custom {
+                        para_id,
+                        name,
+                        chain_spec,
+                        maybe_override: None,
+                        maybe_bite_at: None,
+                        maybe_rpc_endpoint: Some(rpc_endpoint),
+                    })
+                }
                 unknown => {
                     warn!(
                         "⚠️  Warning: Unknown parachain '{}' will be ignored.
-                     Valid options are: asset-hub, coretime, people, bridge-hub, collectives",
+                     Valid options are: asset-hub, coretime, people, bridge-hub, collectives, custom:<para_id>:<rpc>:<chain_spec>",
                         unknown
                     );
                     None
