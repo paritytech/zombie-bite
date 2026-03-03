@@ -132,24 +132,40 @@ pub async fn doppelganger_inner(
     for (para_index, (_sync_node, sync_db_path, sync_chain, sync_head_path)) in
         res.into_iter().enumerate()
     {
+        let para = paras_to
+            .get(para_index)
+            .expect("para_index should be valid. qed");
+
         let sync_chain_name = if sync_chain.contains('/') {
-            let parts: Vec<&str> = sync_chain.split('/').collect();
-            let name_parts: Vec<&str> = parts.last().unwrap().split('.').collect();
-            name_parts.first().unwrap().to_string()
+            // File path (custom para or paseo) — use the canonical chain string for naming
+            para.as_chain_string(&relay_chain.as_chain_string())
         } else {
-            // is not a file
             sync_chain.clone()
         };
 
         let chain_spec_path = format!("{}/{}-spec.json", &base_dir_str, &sync_chain_name);
-        generate_chain_spec(
-            ns.clone(),
-            &chain_spec_path,
-            &context_para.doppelganger_cmd(),
-            &sync_chain,
-        )
-        .await
-        .unwrap();
+
+        if para.is_custom() {
+            // For custom paras, copy the user's chain spec and clear bootNodes
+            // instead of running `doppelganger-parachain build-spec` which may not
+            // understand arbitrary runtimes.
+            let spec_content = std::fs::read_to_string(&sync_chain)
+                .unwrap_or_else(|_| panic!("Failed to read custom chain spec: {}", &sync_chain));
+            let mut spec_json: serde_json::Value = serde_json::from_str(&spec_content)
+                .unwrap_or_else(|_| panic!("Failed to parse custom chain spec JSON: {}", &sync_chain));
+            spec_json["bootNodes"] = serde_json::Value::Array(vec![]);
+            let contents = serde_json::to_string_pretty(&spec_json).unwrap();
+            tokio::fs::write(&chain_spec_path, contents).await.unwrap();
+        } else {
+            generate_chain_spec(
+                ns.clone(),
+                &chain_spec_path,
+                &context_para.doppelganger_cmd(),
+                &sync_chain,
+            )
+            .await
+            .unwrap();
+        }
 
         // generate the data.tgz to use as snapshot
         let snap_path = format!("{}/{}-snap.tgz", &base_dir_str, &sync_chain_name);
@@ -170,9 +186,6 @@ pub async fn doppelganger_inner(
                 .encode(),
         );
 
-        let para = paras_to
-            .get(para_index)
-            .expect("para_index should be valid. qed");
         para_heads_env.push((
             format!("ZOMBIE_{}", &para_head_key(para.id())[2..]),
             para_head[2..].to_string(),
