@@ -282,6 +282,14 @@ pub enum Parachain {
         maybe_bite_at: MaybeByteAt,
         maybe_rpc_endpoint: MaybeSyncUrl,
     },
+    Custom {
+        para_id: u32,
+        name: String,
+        chain_spec: String,
+        maybe_override: MaybeWasmOverridePath,
+        maybe_bite_at: MaybeByteAt,
+        maybe_rpc_endpoint: MaybeSyncUrl,
+    },
 }
 
 impl Parachain {
@@ -317,6 +325,7 @@ impl Parachain {
             Parachain::People { .. } => "people",
             Parachain::BridgeHub { .. } => "bridge-hub",
             Parachain::Collectives { .. } => "collectives",
+            Parachain::Custom { name, .. } => return format!("{name}-{relay_part}-local"),
         };
 
         format!("{para_part}-{relay_part}-local")
@@ -329,6 +338,7 @@ impl Parachain {
             Parachain::People { .. } => "people",
             Parachain::BridgeHub { .. } => "bridge-hub",
             Parachain::Collectives { .. } => "collectives",
+            Parachain::Custom { name, .. } => return format!("{name}-{relay_part}"),
         };
 
         format!("{para_part}-{relay_part}")
@@ -345,6 +355,7 @@ impl Parachain {
             Parachain::People { .. } => 1004,
             Parachain::BridgeHub { .. } => 1002,
             Parachain::Collectives { .. } => 1001,
+            Parachain::Custom { para_id, .. } => *para_id,
         }
     }
 
@@ -354,7 +365,8 @@ impl Parachain {
             | Parachain::Coretime { maybe_override, .. }
             | Parachain::People { maybe_override, .. }
             | Parachain::BridgeHub { maybe_override, .. }
-            | Parachain::Collectives { maybe_override, .. } => maybe_override.as_deref(),
+            | Parachain::Collectives { maybe_override, .. }
+            | Parachain::Custom { maybe_override, .. } => maybe_override.as_deref(),
         }
     }
 
@@ -364,7 +376,8 @@ impl Parachain {
             | Parachain::Coretime { maybe_bite_at, .. }
             | Parachain::People { maybe_bite_at, .. }
             | Parachain::BridgeHub { maybe_bite_at, .. }
-            | Parachain::Collectives { maybe_bite_at, .. } => *maybe_bite_at,
+            | Parachain::Collectives { maybe_bite_at, .. }
+            | Parachain::Custom { maybe_bite_at, .. } => *maybe_bite_at,
         }
     }
 
@@ -384,8 +397,22 @@ impl Parachain {
             }
             | Parachain::Collectives {
                 maybe_rpc_endpoint, ..
+            }
+            | Parachain::Custom {
+                maybe_rpc_endpoint, ..
             } => maybe_rpc_endpoint.as_deref(),
         }
+    }
+
+    pub fn chain_spec_path(&self) -> Option<&str> {
+        match self {
+            Parachain::Custom { chain_spec, .. } => Some(chain_spec.as_str()),
+            _ => None,
+        }
+    }
+
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Parachain::Custom { .. })
     }
 }
 
@@ -461,34 +488,44 @@ pub fn generate_network_config(
 
     let network_builder = paras.iter().fold(network_builder, |builder, para| {
         println!("para: {:?}", para);
-        let (chain_part, id) = match para {
-            Parachain::AssetHub { .. } => ("asset-hub", para.id()),
-            Parachain::Coretime{ .. } => ("coretime", para.id()),
-            Parachain::People { .. } => ("people", para.id()),
-            Parachain::BridgeHub { .. } => ("bridge-hub", para.id()),
-            Parachain::Collectives { .. } => ("collectives", para.id()),
-        };
-        let chain = format!("{}-{}",chain_part, relay_chain);
-
+        let id = para.id();
         let collator_name = format!("Collator-{}", id);
+
         builder.with_parachain(|p| {
-            p.with_id(id)
-                .with_default_command(para_context.cmd().as_str())
-                .with_chain(chain.as_str())
-                .with_chain_spec_command(chain_spec_cmd)
-                .with_collator(|c| {
-                    let col_builder = c.with_name(&collator_name)
-                    .with_args(vec![
-                        ("-l", "aura=debug,runtime=trace,cumulus-consensus=trace,consensus::common=trace,parachain::collation-generation=trace,parachain::collator-protocol=trace,parachain=debug,basic-authorship=trace").into(),
-                        "--force-authoring".into()
-                    ]);
-                    if let Ok(port) = env::var("ZOMBIE_BITE_AH_PORT") {
-                        let rpc_port = port.parse().expect("env var ZOMBIE_BITE_AH_PORT must be a valid u16");
-                        col_builder.with_rpc_port(rpc_port)
-                    } else {
-                        col_builder
-                    }
-                })
+            let p = p
+                .with_id(id)
+                .with_default_command(para_context.cmd().as_str());
+
+            // Custom paras use chain_spec_path directly; system paras use chain name + spec command
+            let p = if let Some(spec_path) = para.chain_spec_path() {
+                p.with_chain_spec_path(spec_path)
+            } else {
+                let chain_part = match para {
+                    Parachain::AssetHub { .. } => "asset-hub",
+                    Parachain::Coretime { .. } => "coretime",
+                    Parachain::People { .. } => "people",
+                    Parachain::BridgeHub { .. } => "bridge-hub",
+                    Parachain::Collectives { .. } => "collectives",
+                    Parachain::Custom { .. } => unreachable!(),
+                };
+                let chain = format!("{}-{}", chain_part, relay_chain);
+                p.with_chain(chain.as_str())
+                    .with_chain_spec_command(chain_spec_cmd)
+            };
+
+            p.with_collator(|c| {
+                let col_builder = c.with_name(&collator_name)
+                .with_args(vec![
+                    ("-l", "aura=debug,runtime=trace,cumulus-consensus=trace,consensus::common=trace,parachain::collation-generation=trace,parachain::collator-protocol=trace,parachain=debug,basic-authorship=trace").into(),
+                    "--force-authoring".into()
+                ]);
+                if let Ok(port) = env::var("ZOMBIE_BITE_AH_PORT") {
+                    let rpc_port = port.parse().expect("env var ZOMBIE_BITE_AH_PORT must be a valid u16");
+                    col_builder.with_rpc_port(rpc_port)
+                } else {
+                    col_builder
+                }
+            })
         })
     });
 
@@ -523,11 +560,14 @@ pub struct RelaychainConfig {
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct ParachainConfig {
     #[serde(rename = "type")]
-    pub parachain_type: String, // asset-hub, coretime, people, bridge-hub
+    pub parachain_type: String, // asset-hub, coretime, people, bridge-hub, collectives, custom
     pub runtime_override: Option<String>,
     pub enabled: Option<bool>, // default true
     pub bite_at: Option<u32>,
     pub rpc_endpoint: Option<String>,
+    pub para_id: Option<u32>,
+    pub chain_spec: Option<String>,
+    pub name: Option<String>,
 }
 
 impl ParachainConfig {
@@ -559,6 +599,31 @@ impl ParachainConfig {
                     maybe_bite_at: self.bite_at,
                     maybe_rpc_endpoint: self.rpc_endpoint.clone(),
                 }),
+                "custom" => {
+                    let para_id = self
+                        .para_id
+                        .expect("Custom parachain requires 'para_id' field");
+                    let chain_spec = self
+                        .chain_spec
+                        .clone()
+                        .expect("Custom parachain requires 'chain_spec' field");
+                    let rpc_endpoint = self
+                        .rpc_endpoint
+                        .clone()
+                        .expect("Custom parachain requires 'rpc_endpoint' field");
+                    let name = self
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| format!("custom-{}", para_id));
+                    Some(Parachain::Custom {
+                        para_id,
+                        name,
+                        chain_spec,
+                        maybe_override: self.runtime_override.clone(),
+                        maybe_bite_at: self.bite_at,
+                        maybe_rpc_endpoint: Some(rpc_endpoint),
+                    })
+                }
                 _ => None,
             }
         } else {
@@ -635,6 +700,9 @@ mod test {
             enabled: None, // Not specified
             bite_at: None,
             rpc_endpoint: None,
+            para_id: None,
+            chain_spec: None,
+            name: None,
         };
 
         assert!(config.to_parachain().is_some());
@@ -652,6 +720,9 @@ mod test {
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: None,
+            para_id: None,
+            chain_spec: None,
+            name: None,
         };
 
         assert!(config.to_parachain().is_some());
@@ -669,6 +740,9 @@ mod test {
             enabled: Some(false),
             bite_at: None,
             rpc_endpoint: None,
+            para_id: None,
+            chain_spec: None,
+            name: None,
         };
 
         assert!(config.to_parachain().is_none());
@@ -683,6 +757,9 @@ mod test {
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: None,
+            para_id: None,
+            chain_spec: None,
+            name: None,
         };
 
         let parachain = config.to_parachain().unwrap();
@@ -703,6 +780,9 @@ mod test {
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: None,
+            para_id: None,
+            chain_spec: None,
+            name: None,
         };
 
         assert!(config.to_parachain().is_none());
@@ -719,6 +799,9 @@ mod test {
                 enabled: Some(true),
                 bite_at: None,
                 rpc_endpoint: None,
+                para_id: None,
+                chain_spec: None,
+                name: None,
             };
 
             assert!(
@@ -973,6 +1056,9 @@ mod test {
                     enabled: Some(true),
                     bite_at: None,
                     rpc_endpoint: None,
+                    para_id: None,
+                    chain_spec: None,
+                    name: None,
                 },
                 ParachainConfig {
                     parachain_type: "coretime".to_string(),
@@ -980,6 +1066,9 @@ mod test {
                     enabled: Some(false), // Disabled
                     bite_at: None,
                     rpc_endpoint: None,
+                    para_id: None,
+                    chain_spec: None,
+                    name: None,
                 },
                 ParachainConfig {
                     parachain_type: "people".to_string(),
@@ -987,6 +1076,9 @@ mod test {
                     enabled: None, // Defaults to true
                     bite_at: None,
                     rpc_endpoint: None,
+                    para_id: None,
+                    chain_spec: None,
+                    name: None,
                 },
             ]),
             base_path: None,
@@ -1093,5 +1185,171 @@ network = "polkadot"
 
         let parachains = config.get_parachains();
         assert_eq!(parachains.len(), 0); // No parachains specified
+    }
+
+    #[test]
+    fn custom_parachain_id() {
+        let para = Parachain::Custom {
+            para_id: 3392,
+            name: "yap-3392".to_string(),
+            chain_spec: "/path/to/spec.json".to_string(),
+            maybe_override: None,
+            maybe_bite_at: None,
+            maybe_rpc_endpoint: Some("wss://example.com".to_string()),
+        };
+        assert_eq!(para.id(), 3392);
+    }
+
+    #[test]
+    fn custom_parachain_chain_strings() {
+        let para = Parachain::Custom {
+            para_id: 3392,
+            name: "yap-3392".to_string(),
+            chain_spec: "/path/to/spec.json".to_string(),
+            maybe_override: None,
+            maybe_bite_at: None,
+            maybe_rpc_endpoint: Some("wss://example.com".to_string()),
+        };
+        assert_eq!(para.as_chain_string("kusama"), "yap-3392-kusama");
+        assert_eq!(para.as_local_chain_string("kusama"), "yap-3392-kusama-local");
+    }
+
+    #[test]
+    fn custom_parachain_chain_spec_path() {
+        let para = Parachain::Custom {
+            para_id: 3392,
+            name: "yap-3392".to_string(),
+            chain_spec: "/path/to/spec.json".to_string(),
+            maybe_override: None,
+            maybe_bite_at: None,
+            maybe_rpc_endpoint: Some("wss://example.com".to_string()),
+        };
+        assert_eq!(para.chain_spec_path(), Some("/path/to/spec.json"));
+        assert!(para.is_custom());
+
+        // Non-custom paras return None for chain_spec_path
+        let ah = Parachain::new("asset-hub");
+        assert_eq!(ah.chain_spec_path(), None);
+        assert!(!ah.is_custom());
+    }
+
+    #[test]
+    fn custom_parachain_config_from_toml() {
+        let toml_content = r#"
+[relaychain]
+network = "kusama"
+
+[[parachains]]
+type = "custom"
+para_id = 3392
+name = "yap-3392"
+rpc_endpoint = "wss://kusama-yap-3392.parity-chains.parity.io"
+chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
+        "#;
+
+        let config: ZombieBiteConfig = toml::from_str(toml_content).unwrap();
+        let parachains = config.get_parachains();
+        assert_eq!(parachains.len(), 1);
+
+        let para = &parachains[0];
+        assert_eq!(para.id(), 3392);
+        assert!(para.is_custom());
+        assert_eq!(
+            para.chain_spec_path(),
+            Some("/path/to/yap-3392-raw-chain-spec.json")
+        );
+        assert_eq!(
+            para.rpc_endpoint(),
+            Some("wss://kusama-yap-3392.parity-chains.parity.io")
+        );
+        assert_eq!(para.as_chain_string("kusama"), "yap-3392-kusama");
+    }
+
+    #[test]
+    fn custom_parachain_config_default_name() {
+        let config = ParachainConfig {
+            parachain_type: "custom".to_string(),
+            runtime_override: None,
+            enabled: Some(true),
+            bite_at: None,
+            rpc_endpoint: Some("wss://example.com".to_string()),
+            para_id: Some(3392),
+            chain_spec: Some("/path/to/spec.json".to_string()),
+            name: None, // Should default to "custom-3392"
+        };
+
+        let para = config.to_parachain().unwrap();
+        assert_eq!(para.as_chain_string("kusama"), "custom-3392-kusama");
+    }
+
+    #[test]
+    #[should_panic(expected = "Custom parachain requires 'para_id' field")]
+    fn custom_parachain_config_missing_para_id() {
+        let config = ParachainConfig {
+            parachain_type: "custom".to_string(),
+            runtime_override: None,
+            enabled: Some(true),
+            bite_at: None,
+            rpc_endpoint: Some("wss://example.com".to_string()),
+            para_id: None,
+            chain_spec: Some("/path/to/spec.json".to_string()),
+            name: None,
+        };
+        config.to_parachain();
+    }
+
+    #[test]
+    #[should_panic(expected = "Custom parachain requires 'chain_spec' field")]
+    fn custom_parachain_config_missing_chain_spec() {
+        let config = ParachainConfig {
+            parachain_type: "custom".to_string(),
+            runtime_override: None,
+            enabled: Some(true),
+            bite_at: None,
+            rpc_endpoint: Some("wss://example.com".to_string()),
+            para_id: Some(3392),
+            chain_spec: None,
+            name: None,
+        };
+        config.to_parachain();
+    }
+
+    #[test]
+    #[should_panic(expected = "Custom parachain requires 'rpc_endpoint' field")]
+    fn custom_parachain_config_missing_rpc_endpoint() {
+        let config = ParachainConfig {
+            parachain_type: "custom".to_string(),
+            runtime_override: None,
+            enabled: Some(true),
+            bite_at: None,
+            rpc_endpoint: None,
+            para_id: Some(3392),
+            chain_spec: Some("/path/to/spec.json".to_string()),
+            name: None,
+        };
+        config.to_parachain();
+    }
+
+    #[test]
+    fn generate_config_with_custom_parachain() {
+        let relaychain = Relaychain::new("kusama");
+        // Create a temp chain spec file for the test
+        let spec_path = "/tmp/test-custom-para-spec.json";
+        std::fs::write(spec_path, r#"{"bootNodes": []}"#).unwrap();
+
+        let parachains = vec![Parachain::Custom {
+            para_id: 3392,
+            name: "yap-3392".to_string(),
+            chain_spec: spec_path.to_string(),
+            maybe_override: None,
+            maybe_bite_at: None,
+            maybe_rpc_endpoint: Some("wss://example.com".to_string()),
+        }];
+
+        let config = generate_network_config(&relaychain, parachains).unwrap();
+        let parachains = config.parachains();
+        assert_eq!(parachains.len(), 1);
+        let para_config = parachains.first().unwrap();
+        assert_eq!(para_config.id(), 3392);
     }
 }
