@@ -29,15 +29,19 @@ fn generate_next_keys_injects(
 }
 
 /// Generate the storage overrides for relay chain validators
+/// Returns (overrides, injects) tuple. Overrides replace existing keys,
+/// injects add keys that may not exist in the original state.
 pub fn generate_rc_overrides(
     validator_keys: &[&crate::utils::ValidatorKeys],
     paras: &[&Parachain],
-) -> serde_json::Value {
+    cores_per_para: u32,
+) -> (serde_json::Value, serde_json::Value) {
     let num_validators = validator_keys.len();
-    let num_cores: u32 = paras
+    let num_paras: u32 = paras
         .len()
         .try_into()
         .expect("The number of paras needs to fit into a u32.");
+    let num_cores: u32 = num_paras * cores_per_para;
 
     // Build stash list for validators (concatenated hex)
     let stash_list: String = validator_keys
@@ -120,8 +124,6 @@ pub fn generate_rc_overrides(
         "cd710b30bd2eab0352ddcc26417aa1940b76934f4cc08dee01012d059e1b83ee": paras_parachains,
         // paraScheduler validatorGroup (dynamic groups based on validator count)
         "94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db": format!("{}{}", validator_groups_count_hex, validator_groups),
-        // paraScheduler claimQueue (empty, will auto-fill)
-        "94eadf0156a8ad5156507773d0471e4a49f6c9aa90c04982c05388649310f22f": "040000000000",
         // paraShared activeValidatorIndices (dynamic)
         "b341e3a63e58a188839b242d17f8c9f82586833f834350b4d435d5fd269ecc8b": format!("{}{}", validator_count_hex, validator_indices),
         // paraShared activeValidatorKeys (dynamic)
@@ -130,11 +132,8 @@ pub fn generate_rc_overrides(
         "2099d7f109d6e535fb000bba623fd4409f99a2ce711f3a31b2fc05604c93f179": format!("{}{}", validator_count_hex, authority_discovery_keys),
         // authorityDiscovery nextKeys (dynamic)
         "2099d7f109d6e535fb000bba623fd4404c014e6bf8b8c2c011e7290b85696bb3": format!("{}{}", validator_count_hex, authority_discovery_keys),
-        // Configuration activeConfig, {x} cores and node_features [1101]
-        "06de3d8a54d27e44a9d5ce189618f22db4b49d95320d9021994c850f25b8e385": format!("0000300000500000aaaa020000001000fbff0000100000000a000000403800005802000003000000020000000000500000c800008000000000e8764817000000000000000000000000e87648170000000000000000000000e80300000090010080000000009001000c01002000000600c4090000000000000601983a000000000000403800000006000000580200000300000019000000000000000200000002000000020000001400000001000000100b010000001400000004000000010500000001000000{}00000000f401000080b2e60e80c3c90180b2e60e00000000000000000000000005000000", array_bytes::bytes2hex("", num_cores.encode())),
-        // TODO: is this needed?
-        // paraScheduler availabilityCores (1 core, free)
-        "94eadf0156a8ad5156507773d0471e4ab8ebad86f546c7e0b135a4212aace339": "0400",
+        // Configuration activeConfig (from real Kusama, with max_validators_per_core=None, minimum_backing_votes=1)
+        "06de3d8a54d27e44a9d5ce189618f22db4b49d95320d9021994c850f25b8e385": format!("0000300000500000aaaa0a0000004000fbff0000800000000a000000100e00005802000006000000020000000000a00000c800001e000000005039278c0400000000000000000000005039278c040000000000000000000019000000009001001e000000009001000c01002000000600c4090000000000000601983a0000000000008070000001bc0200000600000058020000030000002b010000000000001e00000006000000020000001400000001000000100b060000000a0000000a0000000005000000{num_cores}00000000f401000080b2e60e80c3c90100f2052a01000000000000000000000005000000", num_cores = array_bytes::bytes2hex("", num_cores.encode())),
         // Sudo Key (Alice)
         "5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b": "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
     });
@@ -152,8 +151,26 @@ pub fn generate_rc_overrides(
         "",
         substorager::storage_value_key(&b"CoretimeAssignmentProvider"[..], b"CoreDescriptors"),
     );
-    for (index, para) in paras.iter().enumerate() {
-        let index: u32 = index.try_into().expect("Index should be valid u32");
+
+    // CoreDescriptors, ClaimQueue, and AvailabilityCores go into injects
+    // because CoreDescriptors is a StorageMap and new core keys may not exist
+    // in the original forked state (overrides only replace EXISTING keys).
+    let mut injects = json!({});
+
+    // Build ClaimQueue and AvailabilityCores dynamically based on paras and cores
+    // ClaimQueue: BTreeMap<CoreIndex, VecDeque<Assignment>>
+    // Assignment::Bulk(ParaId) = variant 1 + para_id (u32 LE)
+    let mut claim_queue_hex = String::new();
+    // BTreeMap length (compact encoded)
+    claim_queue_hex.push_str(&array_bytes::bytes2hex("", codec::Compact(num_cores).encode()));
+
+    // AvailabilityCores: Vec<CoreState>
+    // CoreState::Free = variant 0
+    let mut availability_cores_hex = String::new();
+    availability_cores_hex.push_str(&array_bytes::bytes2hex("", codec::Compact(num_cores).encode()));
+
+    let mut core_index: u32 = 0;
+    for (_, para) in paras.iter().enumerate() {
         let para_id = ParaId(para.id());
 
         let para_twox64 = array_bytes::bytes2hex("", subhasher::twox64(para_id.encode()));
@@ -169,36 +186,72 @@ pub fn generate_rc_overrides(
         let hrmp_channels_key = format!("{hrmp_hici_prefix}{para_key_part}");
         overrides[hrmp_channels_key] = json!("00");
 
-        // CoretimeAssignmentProvider CoreDescriptors <idx>
-        let core_descriptor_idx_key = format!(
-            "{core_descriptor_prefix}{}",
-            array_bytes::bytes2hex("", subhasher::twox256(index.to_le_bytes()))
-        );
-        let core_descriptor = format!("00010402{}00e100e100010000e1", para_hex);
-        overrides[core_descriptor_idx_key] = json!(core_descriptor);
+        // CoretimeAssignmentProvider CoreDescriptors — assign `cores_per_para` cores to this para
+        // These MUST be injects because the StorageMap keys for new cores don't exist
+        // in the original chain state (overrides silently skip missing keys).
+        for _ in 0..cores_per_para {
+            let core_descriptor_idx_key = format!(
+                "{core_descriptor_prefix}{}",
+                array_bytes::bytes2hex("", subhasher::twox256(core_index.to_le_bytes()))
+            );
+            let core_descriptor = format!("00010402{}00e100e100000000e1", para_hex);
+            injects[core_descriptor_idx_key] = json!(core_descriptor);
+
+            // ClaimQueue entry: CoreIndex(core_index) => VecDeque with `lookahead` entries
+            // Each entry is Assignment::Bulk(para_id) = variant 1 + para_id (u32 LE)
+            let core_idx_hex = array_bytes::bytes2hex("", core_index.to_le_bytes());
+            let assignment_hex = format!("01{}", para_hex); // Assignment::Bulk = variant 1
+            // lookahead=5: match real Kusama config so collators at relay_parent_offset=1 find entries
+            let lookahead: u32 = 5;
+            let vec_len_hex = array_bytes::bytes2hex("", codec::Compact(lookahead).encode());
+            let repeated_assignments = assignment_hex.repeat(lookahead as usize);
+            claim_queue_hex.push_str(&format!("{core_idx_hex}{vec_len_hex}{repeated_assignments}"));
+
+            // AvailabilityCores entry: CoreState::Free = 0x00
+            availability_cores_hex.push_str("00");
+
+            core_index += 1;
+        }
     }
 
-    overrides
+    // paraScheduler ClaimQueue (inject to guarantee it's applied)
+    injects["94eadf0156a8ad5156507773d0471e4a49f6c9aa90c04982c05388649310f22f"] =
+        json!(claim_queue_hex);
+
+    // paraScheduler AvailabilityCores (inject to guarantee it's applied)
+    injects["94eadf0156a8ad5156507773d0471e4ab8ebad86f546c7e0b135a4212aace339"] =
+        json!(availability_cores_hex);
+
+    (overrides, injects)
 }
 
 pub async fn generate_default_overrides_for_rc(
     base_dir: &str,
     relay: &Relaychain,
     paras: &Vec<Parachain>,
+    cores_per_para: u32,
 ) -> PathBuf {
-    // Alice + Bob + number of parachains
-    let num_validators = (2 + paras.len()).min(7);
+    // Need enough validators to back candidates on all cores (1 validator per core minimum)
+    // Capped at 7 (max predefined validator keys available)
+    let num_validators = std::cmp::max(2 + paras.len(), cores_per_para as usize + 1).min(7);
     let validator_keys = get_validator_keys(num_validators);
 
     let next_keys_injects = generate_next_keys_injects(&validator_keys);
 
     // Generate the rc overrides with parachains
     let paras_refs: Vec<&Parachain> = paras.iter().collect();
-    let mut overrides = generate_rc_overrides(&validator_keys, &paras_refs);
+    let (mut overrides, rc_injects) = generate_rc_overrides(&validator_keys, &paras_refs, cores_per_para);
 
     // Keys to inject (mostly storage maps that are not present in the current state)
     // <Pallet> < Item>
     let mut injects = next_keys_injects;
+
+    // Merge CoreDescriptor/ClaimQueue/AvailabilityCores injects
+    if let Value::Object(map) = rc_injects {
+        for (k, v) in map {
+            injects[k] = v;
+        }
+    }
 
     // RcMigrator Manager (set //Alice by default)
     injects["2185d18cb42ae97242af0e70e6ad689012fcd13ee43ae32cc87f798eb5ed3295"] =
@@ -361,6 +414,7 @@ mod test {
             "/tmp",
             &crate::config::Relaychain::new("polakdot"),
             &paras,
+            1,
         )
         .await;
     }
@@ -408,7 +462,7 @@ mod test {
         let validator_keys = get_validator_keys(2);
         let para = crate::config::Parachain::new("asset-hub");
         let paras = vec![&para];
-        let overrides = generate_rc_overrides(&validator_keys, &paras);
+        let (overrides, _injects) = generate_rc_overrides(&validator_keys, &paras, 1);
 
         // Validator Validators
         assert_eq!(

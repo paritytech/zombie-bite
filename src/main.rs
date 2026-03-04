@@ -159,6 +159,7 @@ async fn main() -> Result<(), anyhow::Error> {
             and_spawn,
             with_monitor,
             database,
+            cores,
         } => {
             if with_monitor && !and_spawn {
                 error!("--with-monitor can only be used with --and-spawn");
@@ -174,6 +175,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 base_path,
                 rc_sync_url,
                 and_spawn,
+                cores,
             )?;
 
             debug!("{:?}", resolved_config.relaychain);
@@ -182,6 +184,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 resolved_config.relaychain,
                 resolved_config.parachains,
                 &database,
+                resolved_config.cores,
             )
             .await
             .expect("bite should work");

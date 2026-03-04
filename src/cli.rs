@@ -55,6 +55,9 @@ pub enum Commands {
         /// Db to use
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["rocksdb", "paritydb"]), default_value="rocksdb", verbatim_doc_comment)]
         database: String,
+        /// Number of cores to assign per parachain after spawn (only used with --and-spawn)
+        #[arg(long, default_value_t = 1, verbatim_doc_comment)]
+        cores: u32,
     },
     /// Spawn a new instance of the network from the bite step.
     Spawn {
@@ -135,6 +138,7 @@ pub struct ResolvedBiteConfig {
     pub parachains: Vec<Parachain>,
     pub base_path: PathBuf,
     pub and_spawn: bool,
+    pub cores: u32,
 }
 
 #[derive(Debug)]
@@ -153,6 +157,7 @@ pub fn resolve_bite_config(
     base_path: Option<String>,
     rc_sync_url: Option<String>,
     and_spawn: bool,
+    cores: u32,
 ) -> Result<ResolvedBiteConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -275,11 +280,21 @@ pub fn resolve_bite_config(
         and_spawn
     };
 
+    // Resolve cores (CLI overrides config file)
+    let resolved_cores = if cores > 1 {
+        cores
+    } else if let Some(ref config) = config_file {
+        config.cores.unwrap_or(cores)
+    } else {
+        cores
+    };
+
     Ok(ResolvedBiteConfig {
         relaychain,
         parachains: resolved_parachains,
         base_path: resolved_base_path,
         and_spawn: resolved_and_spawn,
+        cores: resolved_cores,
     })
 }
 

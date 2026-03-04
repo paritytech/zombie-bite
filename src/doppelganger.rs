@@ -60,6 +60,7 @@ pub async fn doppelganger_inner(
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,
     database: &str,
+    cores_per_para: u32,
 ) -> Result<(), anyhow::Error> {
     // Star the node and wait until finish (with temp dir managed by us)
     info!(
@@ -206,7 +207,8 @@ pub async fn doppelganger_inner(
     }
 
     let rc_default_overrides_path =
-        generate_default_overrides_for_rc(&base_dir_str, &relay_chain, &paras_to).await;
+        generate_default_overrides_for_rc(&base_dir_str, &relay_chain, &paras_to, cores_per_para)
+            .await;
     let rc_info_path = format!("{base_dir_str}/rc_info.txt");
     // RELAYCHAIN sync
 
@@ -287,6 +289,7 @@ pub async fn doppelganger_inner(
         para_artifacts,
         Some(global_base_dir.clone()),
         database,
+        cores_per_para,
     )
     .await
     .map_err(|e| anyhow!(e.to_string()))?;
@@ -552,6 +555,7 @@ async fn generate_config(
     paras: Vec<ChainArtifact>,
     global_base_dir: Option<PathBuf>,
     database: &str,
+    cores_per_para: u32,
 ) -> Result<NetworkConfig, String> {
     let leaked_rust_log = env::var("RUST_LOG_RC").unwrap_or_else(|_| {
         String::from(
@@ -613,8 +617,9 @@ async fn generate_config(
         get_random_port().await
     };
 
-    // Alice + Bob + number of parachains
-    let num_validators = (2 + paras.len()).min(7);
+    // Need enough validators to back candidates on all cores (1 per core minimum)
+    // Capped at 7 (max predefined validator keys)
+    let num_validators = std::cmp::max(2 + paras.len(), cores_per_para as usize + 1).min(7);
 
     // config a new network with dynamic validators
     let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {
@@ -625,6 +630,7 @@ async fn generate_config(
             "--no-hardware-benchmarks".into(),
             ("--state-pruning", get_state_pruning_config().as_str()).into(),
             ("--database", database).into(),
+            "--unsafe-rpc-external".into(),
         ];
 
         if let Ok(extra_args) = env::var("ZOMBIE_BITE_RC_EXTRA_ARGS") {
@@ -711,7 +717,7 @@ async fn generate_config(
             let mut para_default_args = vec![
                 (
                     "--relay-chain-rpc-urls",
-                    format!("ws://127.0.0.1:{rpc_alice_port}").as_str(),
+                    format!("ws://0.0.0.0:{rpc_alice_port}").as_str(),
                 )
                     .into(),
                 ("-l", para_leaked_rust_log.as_str()).into(),
@@ -721,6 +727,8 @@ async fn generate_config(
                 "--no-hardware-benchmarks".into(),
                 ("--state-pruning", get_state_pruning_config().as_str()).into(),
                 ("--database", database).into(),
+                "--authoring=slot-based".into(),
+                "--unsafe-rpc-external".into(),
             ];
 
             if let Ok(extra_args) = env::var("ZOMBIE_BITE_AH_EXTRA_ARGS") {
@@ -994,7 +1002,7 @@ mod test {
             para_id: Some(1000),
         };
 
-        let network_config = generate_config(relay, vec![ah], None, "rocksdb")
+        let network_config = generate_config(relay, vec![ah], None, "rocksdb", 1)
             .await
             .unwrap();
 

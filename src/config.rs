@@ -517,7 +517,8 @@ pub fn generate_network_config(
                 let col_builder = c.with_name(&collator_name)
                 .with_args(vec![
                     ("-l", "aura=debug,runtime=trace,cumulus-consensus=trace,consensus::common=trace,parachain::collation-generation=trace,parachain::collator-protocol=trace,parachain=debug,basic-authorship=trace").into(),
-                    "--force-authoring".into()
+                    "--force-authoring".into(),
+                    "--authoring=slot-based".into(),
                 ]);
                 if let Ok(port) = env::var("ZOMBIE_BITE_AH_PORT") {
                     let rpc_port = port.parse().expect("env var ZOMBIE_BITE_AH_PORT must be a valid u16");
@@ -547,6 +548,7 @@ pub struct ZombieBiteConfig {
     pub base_path: Option<String>,
     pub and_spawn: Option<bool>,
     pub with_monitor: Option<bool>,
+    pub cores: Option<u32>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1035,6 +1037,7 @@ mod test {
             base_path: None,
             and_spawn: None,
             with_monitor: None,
+            cores: None,
         };
 
         assert_eq!(config.get_parachains().len(), 0);
@@ -1084,6 +1087,7 @@ mod test {
             base_path: None,
             and_spawn: None,
             with_monitor: None,
+            cores: None,
         };
 
         let parachains = config.get_parachains();
