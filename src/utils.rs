@@ -5,6 +5,7 @@ use std::path::{Path, PathBuf};
 use std::str::FromStr;
 
 use anyhow::anyhow;
+use futures::{SinkExt, StreamExt};
 use serde::de::DeserializeOwned;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
@@ -12,6 +13,7 @@ use sp_core::bytes;
 use tokio::fs::{self, File};
 use tokio::io::{AsyncReadExt, AsyncWriteExt};
 use tokio::net::TcpListener;
+use tokio_tungstenite::{connect_async, tungstenite::Message};
 
 use codec::{CompactAs, Decode, Encode, MaxEncodedLen};
 use tracing::trace;
@@ -393,30 +395,49 @@ struct GetHeaderRpcResponse {
     result: serde_json::Value, // result contains an Object with the header
 }
 
+async fn ws_rpc_call<T: serde::de::DeserializeOwned>(
+    ws: &mut tokio_tungstenite::WebSocketStream<
+        tokio_tungstenite::MaybeTlsStream<tokio::net::TcpStream>,
+    >,
+    request: serde_json::Value,
+) -> Result<T, anyhow::Error> {
+    ws.send(Message::Text(request.to_string().into())).await?;
+    loop {
+        let msg = ws
+            .next()
+            .await
+            .ok_or_else(|| anyhow!("WS closed before response"))??;
+        if let Message::Text(text) = msg {
+            if !text.is_empty() {
+                return Ok(serde_json::from_str::<T>(&text)?);
+            }
+        }
+    }
+}
+
 pub async fn get_header_from_block(
     block_number: u32,
     endpoint: &str,
 ) -> Result<serde_json::Value, anyhow::Error> {
-    let client = reqwest::ClientBuilder::new().build().unwrap();
+    let (mut ws, _) = connect_async(endpoint).await?;
 
-    let res = client
-        .post(endpoint)
-        .json(
-            &json!({"method":"chain_getBlockHash","params":[block_number],"id":1,"jsonrpc":"2.0"}),
-        )
-        .send()
-        .await?;
-    let hash = res.json::<GetBlockHashRpcResponse>().await?.result;
+    let hash = ws_rpc_call::<GetBlockHashRpcResponse>(
+        &mut ws,
+        json!({"method":"chain_getBlockHash","params":[block_number],"id":1,"jsonrpc":"2.0"}),
+    )
+    .await?
+    .result;
     trace!("block: {block_number} -> hash: {}", hash);
 
-    let res = client
-        .post(endpoint)
-        .json(&json!({"method":"chain_getHeader","params":[hash],"id":1,"jsonrpc":"2.0"}))
-        .send()
-        .await?;
-    let header = res.json::<GetHeaderRpcResponse>().await?.result;
+    let header = ws_rpc_call::<GetHeaderRpcResponse>(
+        &mut ws,
+        json!({"method":"chain_getHeader","params":[hash],"id":2,"jsonrpc":"2.0"}),
+    )
+    .await?
+    .result;
     trace!("hash: {} -> header: {:?}", hash, header);
 
+    ws.close(None).await?;
     Ok(header)
 }
 

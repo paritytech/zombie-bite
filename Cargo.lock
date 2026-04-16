@@ -8715,7 +8715,10 @@ checksum = "212d5dcb2a1ce06d81107c3d0ffa3121fe974b73f068c8282cb1c32328113b6c"
 dependencies = [
  "futures-util",
  "log",
+ "rustls 0.21.12",
+ "rustls-native-certs 0.6.3",
  "tokio",
+ "tokio-rustls 0.24.1",
  "tungstenite 0.20.1",
 ]
 
@@ -9007,6 +9010,7 @@ dependencies = [
  "httparse",
  "log",
  "rand 0.8.5",
+ "rustls 0.21.12",
  "sha1",
  "thiserror 1.0.69",
  "url",
@@ -10536,6 +10540,7 @@ dependencies = [
  "substorager",
  "tar",
  "tokio",
+ "tokio-tungstenite 0.20.1",
  "toml 0.9.4",
  "tracing",
  "tracing-subscriber",
