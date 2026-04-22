@@ -54,6 +54,11 @@ pub async fn sync_relay_only(
     if chain.as_ref() == "paseo" || chain.as_ref() == "kusama" {
         env.push(("ZOMBIE_RC_EPOCH_DURATION".into(), "600".into()));
     }
+    // Forward ZOMBIE_RC_RUNWAY if set in the parent env — tunes the
+    // forced-rotation runway in the patched Doppelganger binary.
+    if let Ok(runway) = std::env::var("ZOMBIE_RC_RUNWAY") {
+        env.push(("ZOMBIE_RC_RUNWAY".into(), runway));
+    }
 
     trace!("env: {env:?}");
 

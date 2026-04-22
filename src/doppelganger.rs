@@ -98,7 +98,7 @@ pub async fn doppelganger_inner(
                 .expect("rpc for parachain should be set. qed");
             let header = get_header_from_block(at_block, para_rpc).await?;
 
-            let target_header_path = format!("{base_dir_str}/para-header.json");
+            let target_header_path = format!("{base_dir_str}/para-{}-header.json", para.id());
             fs::write(&target_header_path, serde_json::to_string_pretty(&header)?)
                 .await
                 .expect("create target head json should works");

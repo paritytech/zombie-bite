@@ -11,6 +11,17 @@ use crate::{
     },
 };
 
+/// Build the SCALE-encoded HostConfiguration hex for paras_configuration.
+///
+/// `node_features_hex` is the encoded `BitVec<u8, Lsb0>` for the `node_features`
+/// field. Examples:
+///   - "100b" → [1,1,0,1]      (node_v3_feature disabled)
+///   - "141b" → [1,1,0,1,1]    (node_v3_feature enabled, bit 4 set)
+fn host_configuration_hex(num_cores: u32, node_features_hex: &str) -> String {
+    let num_cores_hex = array_bytes::bytes2hex("", num_cores.encode());
+    format!("0000300000500000aaaa020000001000fbff0000100000000a000000403800005802000003000000020000000000500000c800008000000000e8764817000000000000000000000000e87648170000000000000000000000e80300000090010080000000009001000c01002000000600c4090000000000000601983a000000000000403800000006000000580200000300000019000000000000000200000002000000020000001400000001000000{node_features_hex}010000001400000004000000010500000001000000{num_cores_hex}00000000f401000080b2e60e80c3c90180b2e60e00000000000000000000000005000000")
+}
+
 /// Generate the injects for Session.NextKeys storage overrides for validators
 fn generate_next_keys_injects(
     validator_keys: &[&crate::utils::ValidatorKeys],
@@ -130,8 +141,9 @@ pub fn generate_rc_overrides(
         "2099d7f109d6e535fb000bba623fd4409f99a2ce711f3a31b2fc05604c93f179": format!("{}{}", validator_count_hex, authority_discovery_keys),
         // authorityDiscovery nextKeys (dynamic)
         "2099d7f109d6e535fb000bba623fd4404c014e6bf8b8c2c011e7290b85696bb3": format!("{}{}", validator_count_hex, authority_discovery_keys),
-        // Configuration activeConfig, {x} cores and node_features [11011]
-        "06de3d8a54d27e44a9d5ce189618f22db4b49d95320d9021994c850f25b8e385": format!("0000300000500000aaaa020000001000fbff0000100000000a000000403800005802000003000000020000000000500000c800008000000000e8764817000000000000000000000000e87648170000000000000000000000e80300000090010080000000009001000c01002000000600c4090000000000000601983a000000000000403800000006000000580200000300000019000000000000000200000002000000020000001400000001000000141b010000001400000004000000010500000001000000{}00000000f401000080b2e60e80c3c90180b2e60e00000000000000000000000005000000", array_bytes::bytes2hex("", num_cores.encode())),
+        // Configuration activeConfig, {x} cores and node_features [1101]
+        // node_v3_feature is toggled ON via PendingConfigs below, at the next session rotation.
+        "06de3d8a54d27e44a9d5ce189618f22db4b49d95320d9021994c850f25b8e385": host_configuration_hex(num_cores, "100b"),
         // TODO: is this needed?
         // paraScheduler availabilityCores (1 core, free)
         "94eadf0156a8ad5156507773d0471e4ab8ebad86f546c7e0b135a4212aace339": "0400",
@@ -177,6 +189,21 @@ pub fn generate_rc_overrides(
         let core_descriptor = format!("00010402{}00e100e100010000e1", para_hex);
         overrides[core_descriptor_idx_key] = json!(core_descriptor);
     }
+
+    // Configuration::PendingConfigs — schedule node_v3_feature ON at the next session rotation.
+    // Value type is Vec<(SessionIndex, HostConfiguration)>. A target session of 0 is ≤ any
+    // current session index, so paras_configuration::on_new_session applies it on the first
+    // session rotation after spawn.
+    let pending_configs_key = array_bytes::bytes2hex(
+        "",
+        substorager::storage_value_key(&b"Configuration"[..], b"PendingConfigs"),
+    );
+    let apply_at_session_hex = array_bytes::bytes2hex("", 0u32.encode());
+    let pending_host_config_hex = host_configuration_hex(num_cores, "141b");
+    let pending_configs_value = format!(
+        "04{apply_at_session_hex}{pending_host_config_hex}"
+    );
+    overrides[&pending_configs_key] = json!(pending_configs_value);
 
     overrides
 }
@@ -462,6 +489,42 @@ mod test {
         assert_eq!(
             overrides["5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b"],
             "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
+        );
+    }
+
+    #[test]
+    fn pending_configs_enables_node_v3_feature() {
+        let validator_keys = get_validator_keys(2);
+        let para = crate::config::Parachain::new("asset-hub");
+        let paras = vec![&para];
+        let overrides = generate_rc_overrides(&validator_keys, &paras);
+
+        let pending_configs_key = array_bytes::bytes2hex(
+            "",
+            substorager::storage_value_key(&b"Configuration"[..], b"PendingConfigs"),
+        );
+
+        let value = overrides[&pending_configs_key]
+            .as_str()
+            .expect("PendingConfigs must be set");
+
+        // Compact length 1 + SessionIndex 0 (u32 LE)
+        assert!(value.starts_with("0400000000"), "unexpected header: {value}");
+
+        // HostConfiguration must carry the v3-enabled node_features bitvec (5 bits, 0x1b).
+        assert!(
+            value.contains("141b01000000"),
+            "expected node_features [11011] marker in PendingConfigs value"
+        );
+
+        // ActiveConfig must still have the old bitvec so the transition is observable.
+        let active_config = overrides
+            ["06de3d8a54d27e44a9d5ce189618f22db4b49d95320d9021994c850f25b8e385"]
+            .as_str()
+            .expect("ActiveConfig must be set");
+        assert!(
+            active_config.contains("100b01000000"),
+            "expected node_features [1101] in ActiveConfig (pre-transition)"
         );
     }
 
