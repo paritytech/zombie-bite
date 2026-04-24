@@ -17,9 +17,6 @@ pub fn get_state_pruning_config() -> String {
     env::var("ZOMBIE_BITE_STATE_PRUNING").unwrap_or_else(|_| STATE_PRUNING.to_string())
 }
 
-pub const AH_POLKADOT_RCP: &str = "https://asset-hub-polkadot-rpc.n.dwellir.com";
-pub const AH_KUSAMA_RCP: &str = "https://asset-hub-kusama-rpc.n.dwellir.com";
-
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Step {
     /// Initial step

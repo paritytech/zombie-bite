@@ -42,15 +42,13 @@ pub async fn monit_progress(
     bob: &NetworkNode,
     collator: Option<&NetworkNode>,
     stop_file: Option<&str>,
-) {
+) -> Result<(), anyhow::Error> {
     // monitoring block production every 15 mins
-    let mut alice_block = progress(alice, 0).await.expect("first check should works");
-    let mut bob_block = progress(bob, 0).await.expect("first check should works");
+    let mut alice_block = progress(alice, 0).await?;
+    let mut bob_block = progress(bob, 0).await?;
 
     let mut collator_block = if let Some(collator) = collator {
-        progress(collator, 0)
-            .await
-            .expect("first check should works")
+        progress(collator, 0).await?
     } else {
         // no collator deployed.
         -1_f64
@@ -109,4 +107,6 @@ pub async fn monit_progress(
             check_progress().await
         }
     }
+
+    Ok(())
 }

@@ -103,7 +103,7 @@ pub async fn sync_para(
     info_path: impl AsRef<str>,
     maybe_target_header: Option<String>,
     database: &str,
-) -> Result<(DynNode, String, String, String), ()> {
+) -> Result<(DynNode, String, String, String), anyhow::Error> {
     let chain = parachain.as_chain_string(&relaychain.as_chain_string());
     let para_id_str = parachain.id().to_string();
     let sync_db_path = format!(
@@ -142,13 +142,10 @@ pub async fn sync_para(
     let dest_for_paseo = format!("{}/asset-hub-paseo.json", ns.base_dir().to_string_lossy(),);
     let chain_arg = if chain == "asset-hub-paseo" {
         // get chain spec from https://paseo-r2.zondax.ch/chain-specs/paseo-asset-hub.json
-        let response = reqwest::get(PASEO_ASSET_HUB_SPEC_URL)
-            .await
-            .unwrap_or_else(|_| panic!("Create file {dest_for_paseo} should work"));
-        let mut file = std::fs::File::create(&dest_for_paseo)
-            .unwrap_or_else(|_| panic!("Create file {dest_for_paseo} should work"));
-        let mut content = Cursor::new(response.bytes().await.expect("Create cursor should works."));
-        std::io::copy(&mut content, &mut file).expect("Copy bytes should works.");
+        let response = reqwest::get(PASEO_ASSET_HUB_SPEC_URL).await?;
+        let mut file = std::fs::File::create(&dest_for_paseo)?;
+        let mut content = Cursor::new(response.bytes().await?);
+        std::io::copy(&mut content, &mut file)?;
         dest_for_paseo.as_str()
     } else {
         chain.as_ref()
@@ -187,20 +184,20 @@ pub async fn sync_para(
         .env(env);
 
     info!("🔎 sync para opts: {:?}", opts);
-    let sync_node = ns.spawn_node(&opts).await.unwrap();
+    let sync_node = ns.spawn_node(&opts).await?;
     let metrics_url = format!("http://127.0.0.1:{metrics_random_port}/metrics");
 
     debug!("prometheus link http://127.0.0.1:{metrics_random_port}/metrics");
     info!("📓 sync para logs: {}", sync_node.log_cmd());
 
     wait_ws_ready(&metrics_url).await.unwrap();
-    let url = reqwest::Url::try_from(metrics_url.as_str()).unwrap();
+    let url = reqwest::Url::try_from(metrics_url.as_str())?;
 
     match wait_sync(url).await {
         Ok(_) => info!("✅ Synced (chain: {}), stopping node.", chain),
         Err(e) => {
             error!("❌ Sync failed for parachain {}: {}", chain, e);
-            return Err(());
+            return Err(e);
         }
     }
     // we should just paused
@@ -208,7 +205,6 @@ pub async fn sync_para(
     Ok((
         sync_node,
         sync_db_path,
-        //chain.as_ref().to_string(),
         chain_arg.to_string(),
         para_head_path,
     ))
