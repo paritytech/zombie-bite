@@ -214,7 +214,7 @@ impl Relaychain {
         String::from(match self {
             Relaychain::Polkadot { .. } => "wss://rpc.polkadot.io",
             Relaychain::Kusama { .. } => "wss://kusama-rpc.polkadot.io",
-            Relaychain::Paseo { .. } => "wss://paseo-rpc.dwellir.com",
+            Relaychain::Paseo { .. } => "wss://paseo-rpc.n.dwellir.com",
         })
     }
 
@@ -222,7 +222,7 @@ impl Relaychain {
         String::from(match self {
             Relaychain::Polkadot { .. } => "wss://rpc.polkadot.io",
             Relaychain::Kusama { .. } => "wss://kusama-rpc.polkadot.io",
-            Relaychain::Paseo { .. } => "wss://paseo-rpc.dwellir.com",
+            Relaychain::Paseo { .. } => "wss://paseo-rpc.n.dwellir.com",
         })
     }
 
@@ -282,6 +282,11 @@ pub enum Parachain {
         maybe_bite_at: MaybeByteAt,
         maybe_rpc_endpoint: MaybeSyncUrl,
     },
+    Bulletin {
+        maybe_override: MaybeWasmOverridePath,
+        maybe_bite_at: MaybeByteAt,
+        maybe_rpc_endpoint: MaybeSyncUrl,
+    },
 }
 
 impl Parachain {
@@ -302,6 +307,11 @@ impl Parachain {
                 maybe_bite_at: None,
                 maybe_rpc_endpoint: None,
             },
+            "bulletin" => Parachain::Bulletin {
+                maybe_override: None,
+                maybe_bite_at: None,
+                maybe_rpc_endpoint: None,
+            },
             _ => Parachain::AssetHub {
                 maybe_override: None,
                 maybe_bite_at: None,
@@ -317,6 +327,7 @@ impl Parachain {
             Parachain::People { .. } => "people",
             Parachain::BridgeHub { .. } => "bridge-hub",
             Parachain::Collectives { .. } => "collectives",
+            Parachain::Bulletin { .. } => "bulletin",
         };
 
         format!("{para_part}-{relay_part}-local")
@@ -329,6 +340,7 @@ impl Parachain {
             Parachain::People { .. } => "people",
             Parachain::BridgeHub { .. } => "bridge-hub",
             Parachain::Collectives { .. } => "collectives",
+            Parachain::Bulletin { .. } => "bulletin",
         };
 
         format!("{para_part}-{relay_part}")
@@ -345,6 +357,7 @@ impl Parachain {
             Parachain::People { .. } => 1004,
             Parachain::BridgeHub { .. } => 1002,
             Parachain::Collectives { .. } => 1001,
+            Parachain::Bulletin { .. } => 5118,
         }
     }
 
@@ -354,7 +367,8 @@ impl Parachain {
             | Parachain::Coretime { maybe_override, .. }
             | Parachain::People { maybe_override, .. }
             | Parachain::BridgeHub { maybe_override, .. }
-            | Parachain::Collectives { maybe_override, .. } => maybe_override.as_deref(),
+            | Parachain::Collectives { maybe_override, .. }
+            | Parachain::Bulletin { maybe_override, .. } => maybe_override.as_deref(),
         }
     }
 
@@ -364,7 +378,8 @@ impl Parachain {
             | Parachain::Coretime { maybe_bite_at, .. }
             | Parachain::People { maybe_bite_at, .. }
             | Parachain::BridgeHub { maybe_bite_at, .. }
-            | Parachain::Collectives { maybe_bite_at, .. } => *maybe_bite_at,
+            | Parachain::Collectives { maybe_bite_at, .. }
+            | Parachain::Bulletin { maybe_bite_at, .. } => *maybe_bite_at,
         }
     }
 
@@ -383,6 +398,9 @@ impl Parachain {
                 maybe_rpc_endpoint, ..
             }
             | Parachain::Collectives {
+                maybe_rpc_endpoint, ..
+            }
+            | Parachain::Bulletin {
                 maybe_rpc_endpoint, ..
             } => maybe_rpc_endpoint.as_deref(),
         }
@@ -467,6 +485,7 @@ pub fn generate_network_config(
             Parachain::People { .. } => ("people", para.id()),
             Parachain::BridgeHub { .. } => ("bridge-hub", para.id()),
             Parachain::Collectives { .. } => ("collectives", para.id()),
+            Parachain::Bulletin { .. } => ("bulletin", para.id()),
         };
         let chain = format!("{}-{}",chain_part, relay_chain);
 
@@ -555,6 +574,11 @@ impl ParachainConfig {
                     maybe_rpc_endpoint: self.rpc_endpoint.clone(),
                 }),
                 "collectives" => Some(Parachain::Collectives {
+                    maybe_override: self.runtime_override.clone(),
+                    maybe_bite_at: self.bite_at,
+                    maybe_rpc_endpoint: self.rpc_endpoint.clone(),
+                }),
+                "bulletin" => Some(Parachain::Bulletin {
                     maybe_override: self.runtime_override.clone(),
                     maybe_bite_at: self.bite_at,
                     maybe_rpc_endpoint: self.rpc_endpoint.clone(),
@@ -710,7 +734,14 @@ mod test {
 
     #[test]
     fn all_parachain_types_supported() {
-        let types = vec!["asset-hub", "coretime", "people", "bridge-hub"];
+        let types = vec![
+            "asset-hub",
+            "coretime",
+            "people",
+            "bridge-hub",
+            "collectives",
+            "bulletin",
+        ];
 
         for parachain_type in types {
             let config = ParachainConfig {
@@ -767,6 +798,15 @@ mod test {
             .id(),
             1002
         );
+        assert_eq!(
+            Parachain::Bulletin {
+                maybe_override: None,
+                maybe_bite_at: None,
+                maybe_rpc_endpoint: None
+            }
+            .id(),
+            5118
+        );
     }
 
     #[test]
@@ -809,6 +849,16 @@ mod test {
             .as_chain_string(relay),
             "bridge-hub-polkadot"
         );
+        let paseo = "paseo";
+        assert_eq!(
+            Parachain::Bulletin {
+                maybe_override: None,
+                maybe_bite_at: None,
+                maybe_rpc_endpoint: None
+            }
+            .as_chain_string(paseo),
+            "bulletin-paseo"
+        );
     }
 
     #[test]
@@ -850,6 +900,16 @@ mod test {
             }
             .as_local_chain_string(relay),
             "bridge-hub-kusama-local"
+        );
+        let paseo = "paseo";
+        assert_eq!(
+            Parachain::Bulletin {
+                maybe_override: None,
+                maybe_bite_at: None,
+                maybe_rpc_endpoint: None
+            }
+            .as_local_chain_string(paseo),
+            "bulletin-paseo-local"
         );
     }
 

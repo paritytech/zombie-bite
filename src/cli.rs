@@ -35,7 +35,7 @@ pub enum Commands {
         /// If provided we will _bite_ the live network at the supplied block hieght
         #[arg(long = "rc-bite-at", verbatim_doc_comment)]
         relay_bite_at: Option<u32>,
-        /// Parachains to include: asset-hub, coretime, people, bridge-hub, collectives (comma-separated)
+        /// Parachains to include: asset-hub, coretime, people, bridge-hub, collectives, bulletin (comma-separated)
         #[arg(long, short = 'p', value_delimiter = ',', verbatim_doc_comment)]
         parachains: Option<Vec<String>>,
         /// Base path to use. if not provided we will check the env 'ZOMBIE_BITE_BASE_PATH' and if not present we will use `<cwd>_timestamp`
@@ -74,7 +74,7 @@ pub enum Commands {
     /// [Helper] Generate artifacts to be used by the next step (only 'spawn' and 'post' allowed)
     GenerateArtifacts {
         /// The network will be using for bite (will try the network + ah)
-        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusame", "paseo"]), default_value="polkadot")]
+        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo"]), default_value="polkadot")]
         relay: String,
         /// Base path to use. if not provided we will check the env 'ZOMBIE_BITE_BASE_PATH' and if not present we will use `<cwd>_timestamp`
         #[arg(long, short = 'd', verbatim_doc_comment)]
@@ -86,7 +86,7 @@ pub enum Commands {
     /// [Helper] Clean up directory to only include the needed artifacts
     CleanUpDir {
         /// The network will be using for bite (will try the network + ah)
-        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusame", "paseo"]), default_value="polkadot")]
+        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo"]), default_value="polkadot")]
         relay: String,
         /// Base path to use. if not provided we will check the env 'ZOMBIE_BITE_BASE_PATH' and if not present we will use `<cwd>_timestamp`
         #[arg(long, short = 'd', verbatim_doc_comment)]
@@ -215,10 +215,15 @@ pub fn resolve_bite_config(
                     maybe_bite_at: None,
                     maybe_rpc_endpoint: None,
                 }),
+                "bulletin" => Some(Parachain::Bulletin {
+                    maybe_override: None,
+                    maybe_bite_at: None,
+                    maybe_rpc_endpoint: None,
+                }),
                 unknown => {
                     warn!(
                         "⚠️  Warning: Unknown parachain '{}' will be ignored.
-                     Valid options are: asset-hub, coretime, people, bridge-hub, collectives",
+                     Valid options are: asset-hub, coretime, people, bridge-hub, collectives, bulletin",
                         unknown
                     );
                     None

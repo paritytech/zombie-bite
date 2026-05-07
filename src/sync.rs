@@ -18,6 +18,16 @@ use zombienet_support::net::wait_ws_ready;
 
 const PASEO_ASSET_HUB_SPEC_URL: &str =
     "https://paseo-r2.zondax.ch/chain-specs/paseo-asset-hub.json";
+const BULLETIN_PASEO_SPEC_URL: &str =
+    "https://raw.githubusercontent.com/paritytech/chainspecs/main/paseo/parachain/bulletin/raw.json";
+
+fn maybe_hosted_spec_url(chain: &str) -> Option<&'static str> {
+    match chain {
+        "asset-hub-paseo" => Some(PASEO_ASSET_HUB_SPEC_URL),
+        "bulletin-paseo" => Some(BULLETIN_PASEO_SPEC_URL),
+        _ => None,
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_relay_only(
@@ -139,17 +149,17 @@ pub async fn sync_para(
 
     trace!("env: {env:?}");
 
-    let dest_for_paseo = format!("{}/asset-hub-paseo.json", ns.base_dir().to_string_lossy(),);
-    let chain_arg = if chain == "asset-hub-paseo" {
-        // get chain spec from https://paseo-r2.zondax.ch/chain-specs/paseo-asset-hub.json
-        let response = reqwest::get(PASEO_ASSET_HUB_SPEC_URL)
+    let hosted_spec_dest = format!("{}/{}.json", ns.base_dir().to_string_lossy(), &chain);
+    let chain_arg = if let Some(url) = maybe_hosted_spec_url(chain.as_str()) {
+        info!("📥 Downloading chain spec for {chain} from {url}");
+        let response = reqwest::get(url)
             .await
-            .unwrap_or_else(|_| panic!("Create file {dest_for_paseo} should work"));
-        let mut file = std::fs::File::create(&dest_for_paseo)
-            .unwrap_or_else(|_| panic!("Create file {dest_for_paseo} should work"));
+            .unwrap_or_else(|_| panic!("Fetch chain spec from {url} should work"));
+        let mut file = std::fs::File::create(&hosted_spec_dest)
+            .unwrap_or_else(|_| panic!("Create file {hosted_spec_dest} should work"));
         let mut content = Cursor::new(response.bytes().await.expect("Create cursor should works."));
         std::io::copy(&mut content, &mut file).expect("Copy bytes should works.");
-        dest_for_paseo.as_str()
+        hosted_spec_dest.as_str()
     } else {
         chain.as_ref()
     };

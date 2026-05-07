@@ -148,12 +148,7 @@ pub fn generate_rc_overrides(
         "",
         substorager::storage_value_key(&b"Hrmp"[..], b"HrmpIngressChannelsIndex"),
     );
-    let core_descriptor_prefix = array_bytes::bytes2hex(
-        "",
-        substorager::storage_value_key(&b"CoretimeAssignmentProvider"[..], b"CoreDescriptors"),
-    );
-    for (index, para) in paras.iter().enumerate() {
-        let index: u32 = index.try_into().expect("Index should be valid u32");
+    for para in paras.iter() {
         let para_id = ParaId(para.id());
 
         let para_twox64 = array_bytes::bytes2hex("", subhasher::twox64(para_id.encode()));
@@ -168,15 +163,48 @@ pub fn generate_rc_overrides(
         // HRMP hrmpIngressChannelsIndex (empty for each para)
         let hrmp_channels_key = format!("{hrmp_hici_prefix}{para_key_part}");
         overrides[hrmp_channels_key] = json!("00");
-
-        // CoretimeAssignmentProvider CoreDescriptors <idx>
-        let core_descriptor_idx_key = format!(
-            "{core_descriptor_prefix}{}",
-            array_bytes::bytes2hex("", subhasher::twox256(index.to_le_bytes()))
-        );
-        let core_descriptor = format!("00010402{}00e100e100010000e1", para_hex);
-        overrides[core_descriptor_idx_key] = json!(core_descriptor);
     }
+
+    // ParaScheduler::CoreDescriptors is a StorageValue<Vec<(CoreIndex, CoreDescriptor)>>.
+    // The bitten state has an entry for every para registered on the live relay (50+ on paseo),
+    // but `Configuration::activeConfig.num_cores` is overridden above to `paras.len()` cores.
+    // We rewrite the value to one (core_index, Task(para_id, ...)) pair per para in our list,
+    // so each kept para gets its own dedicated core. Without this, core 0 stays assigned to
+    // whichever live para sat in the first slot of the bitten state, and our paras never
+    // get backable-candidate requests.
+    //
+    // SCALE layout per (CoreIndex, CoreDescriptor) entry, matching live paseo state:
+    //   [4 bytes core_index_u32_le][CoreDescriptor]
+    // CoreDescriptor for an active Task assignment to ParaId X:
+    //   00              queue: None
+    //   01              current_work: Some
+    //   04              assignments: Vec compact-len 1
+    //   02              CoreAssignment::Task variant
+    //   <4 bytes LE>    ParaId
+    //   00e100e100010000e1  remaining WorkState bytes (mask + assignment state + pos/step)
+    let core_descriptors_key = array_bytes::bytes2hex(
+        "",
+        substorager::storage_value_key(&b"ParaScheduler"[..], b"CoreDescriptors"),
+    );
+    let num_paras: u32 = paras
+        .len()
+        .try_into()
+        .expect("The number of paras needs to fit into a u32.");
+    // Compact-encode the vec length; we only support up to 63 paras here (single-byte form).
+    assert!(
+        num_paras < 64,
+        "more than 63 parachains is not supported by the CoreDescriptors override"
+    );
+    let mut core_descriptors_value = format!("{:02x}", (num_paras as u8) << 2);
+    for (idx, para) in paras.iter().enumerate() {
+        let core_idx: u32 = idx.try_into().expect("Index should fit in u32");
+        let para_hex = array_bytes::bytes2hex("", ParaId(para.id()).encode());
+        let core_idx_hex = array_bytes::bytes2hex("", core_idx.to_le_bytes());
+        core_descriptors_value.push_str(&format!(
+            "{core_idx_hex}00010402{para_hex}00e100e100010000e1"
+        ));
+    }
+    overrides[core_descriptors_key] = json!(core_descriptors_value);
 
     overrides
 }
@@ -310,6 +338,19 @@ pub async fn generate_default_overrides_for_para(
         // CollatorSelection DesiredCandidates (set to 1)
         "15464cac3378d46f113cd5b7a4d71c84476f594316a7dfe49c1f352d95abdaf1": "01000000"
     });
+
+    // Bulletin's pallet-bulletin-transaction-storage::on_finalize asserts that a per-block
+    // `apply_block_inherents` storage-proof inherent ran (via `ProofChecked`), or that the
+    // target block (n - RetentionPeriod) is zero / has no stored transactions. The generic
+    // doppelganger-parachain (omni-node) doesn't supply that inherent, so we sidestep the
+    // assert by overriding `RetentionPeriod` to u32::MAX — `n.saturating_sub(period)` then
+    // saturates to 0, the `is_zero()` branch short-circuits, and `on_finalize` passes.
+    // Storage key = twox128("TransactionStorage") + twox128("RetentionPeriod"); value is
+    // SCALE-encoded u32 LE (0xffffffff).
+    if let Parachain::Bulletin { .. } = para {
+        overrides["0e7b504e5df47062be129a8958a7a1278d69b77f53c8c31f3b84d472fdb7de2b"] =
+            json!("ffffffff");
+    }
 
     if let Some(override_wasm) = para.wasm_overrides() {
         let wasm_content = fs::read(override_wasm)
