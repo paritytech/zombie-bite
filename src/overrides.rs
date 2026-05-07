@@ -200,8 +200,9 @@ pub fn generate_rc_overrides(
         let core_idx: u32 = idx.try_into().expect("Index should fit in u32");
         let para_hex = array_bytes::bytes2hex("", ParaId(para.id()).encode());
         let core_idx_hex = array_bytes::bytes2hex("", core_idx.to_le_bytes());
-        core_descriptors_value
-            .push_str(&format!("{core_idx_hex}00010402{para_hex}00e100e100010000e1"));
+        core_descriptors_value.push_str(&format!(
+            "{core_idx_hex}00010402{para_hex}00e100e100010000e1"
+        ));
     }
     overrides[core_descriptors_key] = json!(core_descriptors_value);
 
