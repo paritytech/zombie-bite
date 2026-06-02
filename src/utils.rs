@@ -463,7 +463,7 @@ mod test {
 
     #[test]
     fn encode_u32() {
-        let val = 2_u32;
+        let val = 56_u32;
         let encoded = val.encode();
         println!("{}", array_bytes::bytes2hex("0x", encoded));
     }

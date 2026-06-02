@@ -6,11 +6,11 @@ default-run = "zombie-bite"
 
 
 [dependencies]
-zombienet-sdk = "0.4.2"
-zombienet-provider = "0.4.2"
-zombienet-orchestrator = "0.4.2"
-zombienet-support = "0.4.2"
-zombienet-configuration = "0.4.2"
+zombienet-sdk = "0.4.12"
+zombienet-provider = "0.4.12"
+zombienet-orchestrator = "0.4.12"
+zombienet-support = "0.4.12"
+zombienet-configuration = "0.4.12"
 clap = { version = "4.4.18", features = ["derive"] }
 tokio = "1"
 reqwest = { version = "0.12", features = ["json"] }
@@ -44,9 +44,9 @@ toml = "0.9"
 # name = "spawn"
 # path = "src/from_toml.rs"
 
-# [patch.crates-io]
-# zombienet-orchestrator =  { path = "../zombienet-sdk/crates/orchestrator" }
-# zombienet-provider =  { path = "../zombienet-sdk/crates/provider" }
-# zombienet-configuration = { path = "../zombienet-sdk/crates/configuration" }
-# zombienet-support = { path = "../zombienet-sdk/crates/support" }
-# zombienet-sdk = { path = "../zombienet-sdk/crates/sdk" }
+[patch.crates-io]
+zombienet-orchestrator =  { path = "../zombienet-sdk/crates/orchestrator" }
+zombienet-provider =  { path = "../zombienet-sdk/crates/provider" }
+zombienet-configuration = { path = "../zombienet-sdk/crates/configuration" }
+zombienet-support = { path = "../zombienet-sdk/crates/support" }
+zombienet-sdk = { path = "../zombienet-sdk/crates/sdk" }

@@ -26,7 +26,7 @@ pub enum Commands {
         /// The network will be using for bite
         /// If not specified, will use the value from config.
         /// If not in config, defaults to polkadot.
-        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo"]))]
+        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo", "westend"]))]
         relay: Option<String>,
         /// If provided we will override the runtime as part of the process of 'bite'
         /// The resulting network will be running with this runtime.
