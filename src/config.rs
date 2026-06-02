@@ -679,14 +679,14 @@ impl ParachainConfig {
 
                     let id: u32 = id
                         .parse()
-                        .expect(&format!("Invalid custom para id: {}", id));
+                        .unwrap_or_else(|_| panic!("Invalid custom para id: {}", id));
 
                     Some(Parachain::Custom {
                         maybe_override: self.runtime_override.clone(),
                         maybe_bite_at: self.bite_at,
                         maybe_rpc_endpoint: self.rpc_endpoint.clone(),
-                        chain_spec: chain_spec,
-                        id: id,
+                        chain_spec,
+                        id,
                         cores: self.cores.unwrap_or(1),
                     })
                 }

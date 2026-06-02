@@ -150,7 +150,7 @@ pub async fn doppelganger_inner(
 
         let sync_chain_name = para.as_chain_string(&relay_chain.as_chain_string());
 
-        let chain_spec_path = format!("{}/{}-spec.json", &base_dir_str, &sync_chain_name);
+        let chain_spec_path = format!("{}/{}-spec.json", base_dir_str, sync_chain_name);
         generate_chain_spec(
             ns.clone(),
             &chain_spec_path,
@@ -161,7 +161,7 @@ pub async fn doppelganger_inner(
         .unwrap();
 
         // generate the data.tgz to use as snapshot
-        let snap_path = format!("{}/{}-snap.tgz", &base_dir_str, &sync_chain_name);
+        let snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain_name);
         trace!("snap_path: {snap_path}");
         generate_snap(&sync_db_path, &snap_path).await.unwrap();
 
@@ -237,7 +237,7 @@ pub async fn doppelganger_inner(
     // get the chain-spec (prod) and clean the bootnodes
     // relaychain
     let context_relay = Context::Relaychain;
-    let r_chain_spec_path = format!("{}/{}-spec.json", &base_dir_str, &sync_chain);
+    let r_chain_spec_path = format!("{}/{}-spec.json", base_dir_str, sync_chain);
     generate_chain_spec(
         ns.clone(),
         &r_chain_spec_path,
@@ -268,7 +268,7 @@ pub async fn doppelganger_inner(
         .expect("remove parachains db should work");
 
     // generate the data.tgz to use as snapshot
-    let r_snap_path = format!("{}/{}-snap.tgz", &base_dir_str, &sync_chain);
+    let r_snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain);
     generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
 
     let relay_artifacts = ChainArtifact {
@@ -866,8 +866,8 @@ async fn generate_chain_spec(
 }
 
 async fn run_doppelganger_node(ns: DynNamespace, base_path: &Path) -> Result<(), String> {
-    let data_path = format!("{}/sync_db", &base_path.to_string_lossy());
-    let logs_path = format!("{}/sync.log", &base_path.to_string_lossy());
+    let data_path = format!("{}/sync_db", base_path.to_string_lossy());
+    let logs_path = format!("{}/sync.log", base_path.to_string_lossy());
     info!(
         "⛓  Syncing using warp, this could take a while. You can follow the logs with: \n\t
     tail -f {}",
@@ -889,7 +889,7 @@ async fn run_doppelganger_node(ns: DynNamespace, base_path: &Path) -> Result<(),
                     "-c",
                     format!(
                         "doppelganger -l doppelganger=debug --chain kusama --sync warp -d {} > {} 2>&1",
-                        &data_path, &logs_path
+                        data_path, logs_path
                     )
                     .as_str(),
                 ])

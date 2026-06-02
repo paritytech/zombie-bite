@@ -369,7 +369,7 @@ pub async fn localize_config(config_path: impl AsRef<str>) -> Result<(), anyhow:
         // rename original
         fs::rename(
             &config_path,
-            &format!("{}/original-config.toml", &base_path.to_string_lossy()),
+            &format!("{}/original-config.toml", base_path.to_string_lossy()),
         )
         .await
         .expect("rename should works");

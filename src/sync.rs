@@ -57,7 +57,7 @@ pub async fn sync_relay_only(
     let rc = Relaychain::new(chain.as_ref());
     env.push((
         "ZOMBIE_RC_EPOCH_DURATION".into(),
-        rc.epoch_duration().to_string().into(),
+        rc.epoch_duration().to_string(),
     ));
 
     // if we are sync westend, let doppelganger know to bypass
@@ -120,13 +120,13 @@ pub async fn sync_para(
     let sync_db_path = format!(
         "{}/paras/{}/sync-db",
         ns.base_dir().to_string_lossy(),
-        &chain,
+        chain,
     );
 
     let para_head_path = format!(
         "{}/paras/{}/head.txt",
         ns.base_dir().to_string_lossy(),
-        &chain,
+        chain,
     );
 
     let rpc_random_port = get_random_port().await;

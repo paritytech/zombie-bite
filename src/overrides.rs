@@ -169,8 +169,7 @@ fn augment_overrides_for_paras(relay: &Relaychain, paras: &[&Parachain], overrid
     let mut core_index = 0_u32;
     let mut para_scheduler_value_parts: Vec<String> = vec![];
 
-    for (_i, para) in paras.iter().enumerate() {
-        // let index: u32 = index.try_into().expect("Index should be valid u32");
+    for  para in paras.iter() {
         let para_id = ParaId(para.id());
 
         let para_twox64 = array_bytes::bytes2hex("", subhasher::twox64(para_id.encode()));
@@ -387,7 +386,7 @@ mod test {
             "",
             substorager::storage_value_key(&b"Babe"[..], b"GenesisSlot"),
         );
-        let mut a = 295769115_u64;
+        let a = 295769115_u64;
         let a_encoded = a.encode();
         println!("{}: {}", prefix, array_bytes::bytes2hex("", a_encoded));
     }
@@ -396,7 +395,7 @@ mod test {
     fn encode_u32() {
         let a = 100_u32;
         let a_encoded = a.encode();
-        println!("{}: {}", "a", array_bytes::bytes2hex("", a_encoded));
+        println!("encoded: {}", array_bytes::bytes2hex("", a_encoded));
     }
 
     #[test]
