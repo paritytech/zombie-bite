@@ -71,6 +71,12 @@ jobs:
       - name: Generate checksums
         run: |
           cd artifacts
+          # move files to artifacts
+          mv zombie-bite-macos-latest-aarch64-apple-darwin-${{ github.ref_name }}/* .
+          rmdir zombie-bite-macos-latest-aarch64-apple-darwin-${{ github.ref_name }}
+
+          mv zombie-bite-ubuntu-latest-x86_64-unknown-linux-gnu-${{ github.ref_name }}/* .
+          rmdir zombie-bite-ubuntu-latest-x86_64-unknown-linux-gnu-${{ github.ref_name }}
           sha256sum * > checksums.txt
 
       - name: Create Release
