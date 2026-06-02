@@ -846,7 +846,7 @@ version = "2.2.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "90dbd31c98227229239363921e60fcf5e558e43ec69094d46fc4996f08d1d5bc"
 dependencies = [
- "bitcoin_hashes 0.13.0",
+ "bitcoin_hashes 0.14.0",
  "rand 0.8.5",
  "rand_core 0.6.4",
  "serde",
@@ -10812,6 +10812,8 @@ dependencies = [
 [[package]]
 name = "zombienet-configuration"
 version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "b2c269216bae9a4628882f272d00d5e44be68091e7b468e75dc70fe7f3e838e4"
 dependencies = [
  "anyhow",
  "lazy_static",
@@ -10831,6 +10833,8 @@ dependencies = [
 [[package]]
 name = "zombienet-orchestrator"
 version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "dd5fc4ca778d2bf804f6ea1983f248957452f55fbf06bbb47f31a2bfbbac516b"
 dependencies = [
  "anyhow",
  "array-bytes",
@@ -10867,6 +10871,8 @@ dependencies = [
 [[package]]
 name = "zombienet-prom-metrics-parser"
 version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aa851f64b120ee4f5fc13f453f18bb3eb984225e21a91a480f713ecf23c409a0"
 dependencies = [
  "pest",
  "pest_derive",
@@ -10876,6 +10882,8 @@ dependencies = [
 [[package]]
 name = "zombienet-provider"
 version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "85a96858350524976ca391e88d637c51a1698de26a2a9de815b79ab99e53911f"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10906,6 +10914,8 @@ dependencies = [
 [[package]]
 name = "zombienet-sdk"
 version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "fac89f216adc651f1bc3c064b53b2a907efee05acb1a6b272dce3d1419a9d9bb"
 dependencies = [
  "anyhow",
  "async-trait",
@@ -10930,6 +10940,8 @@ dependencies = [
 [[package]]
 name = "zombienet-support"
 version = "0.4.13"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e00dc9084a78b16d2c3d0bd1c79a34998466ce7f522187ec1c7880b250af4011"
 dependencies = [
  "anyhow",
  "async-trait",
