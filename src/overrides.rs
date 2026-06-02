@@ -169,7 +169,7 @@ fn augment_overrides_for_paras(relay: &Relaychain, paras: &[&Parachain], overrid
     let mut core_index = 0_u32;
     let mut para_scheduler_value_parts: Vec<String> = vec![];
 
-    for  para in paras.iter() {
+    for para in paras.iter() {
         let para_id = ParaId(para.id());
 
         let para_twox64 = array_bytes::bytes2hex("", subhasher::twox64(para_id.encode()));
