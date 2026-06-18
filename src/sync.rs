@@ -51,8 +51,19 @@ pub async fn sync_relay_only(
     env.push(("ZOMBIE_RC_OVERRIDES_PATH".to_string(), rc_overrides_path));
     env.push(("RUST_LOG".into(), "doppelganger=debug".into()));
     env.push(("ZOMBIE_INFO_PATH".into(), info_path.as_ref().into()));
-    if chain.as_ref() == "paseo" || chain.as_ref() == "kusama" {
-        env.push(("ZOMBIE_RC_EPOCH_DURATION".into(), "600".into()));
+    env.push(("ZOMBIE_CHAIN".into(), chain.as_ref().into()));
+
+    // get the epoch duration from the chain config
+    let rc = Relaychain::new(chain.as_ref());
+    env.push((
+        "ZOMBIE_RC_EPOCH_DURATION".into(),
+        rc.epoch_duration().to_string(),
+    ));
+
+    // if we are sync westend, let doppelganger know to bypass
+    // justification checks
+    if chain.as_ref() == "westend" {
+        env.push(("ZOMBIE_IS_WESTEND".into(), "1".into()));
     }
 
     trace!("env: {env:?}");
@@ -109,13 +120,13 @@ pub async fn sync_para(
     let sync_db_path = format!(
         "{}/paras/{}/sync-db",
         ns.base_dir().to_string_lossy(),
-        &chain,
+        chain,
     );
 
     let para_head_path = format!(
         "{}/paras/{}/head.txt",
         ns.base_dir().to_string_lossy(),
-        &chain,
+        chain,
     );
 
     let rpc_random_port = get_random_port().await;
@@ -155,6 +166,8 @@ pub async fn sync_para(
         let mut content = Cursor::new(response.bytes().await.expect("Create cursor should works."));
         std::io::copy(&mut content, &mut file).expect("Copy bytes should works.");
         dest_for_paseo.as_str()
+    } else if let Some(chain_spec) = parachain.chain_spec() {
+        chain_spec
     } else {
         chain.as_ref()
     };

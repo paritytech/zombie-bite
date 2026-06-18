@@ -26,7 +26,7 @@ pub enum Commands {
         /// The network will be using for bite
         /// If not specified, will use the value from config.
         /// If not in config, defaults to polkadot.
-        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo"]))]
+        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo", "westend"]))]
         relay: Option<String>,
         /// If provided we will override the runtime as part of the process of 'bite'
         /// The resulting network will be running with this runtime.
@@ -232,12 +232,13 @@ pub fn resolve_bite_config(
                     let chain_spec = parts[3].to_string();
                     let name = format!("custom-{}", para_id);
                     Some(Parachain::Custom {
-                        para_id,
+                        id: para_id,
                         name,
                         chain_spec,
                         maybe_override: None,
                         maybe_bite_at: None,
                         maybe_rpc_endpoint: Some(rpc_endpoint),
+                        cores: 1, // needs to have a value from cli/toml
                     })
                 }
                 unknown => {

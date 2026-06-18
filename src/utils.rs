@@ -369,7 +369,7 @@ pub async fn localize_config(config_path: impl AsRef<str>) -> Result<(), anyhow:
         // rename original
         fs::rename(
             &config_path,
-            &format!("{}/original-config.toml", &base_path.to_string_lossy()),
+            &format!("{}/original-config.toml", base_path.to_string_lossy()),
         )
         .await
         .expect("rename should works");
@@ -463,7 +463,7 @@ mod test {
 
     #[test]
     fn encode_u32() {
-        let val = 2_u32;
+        let val = 56_u32;
         let encoded = val.encode();
         println!("{}", array_bytes::bytes2hex("0x", encoded));
     }

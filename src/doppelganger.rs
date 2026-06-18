@@ -36,7 +36,9 @@ use crate::utils::{
     get_header_from_block, get_random_port, localize_config, para_head_key, HeadData,
 };
 
-use crate::config::{get_state_pruning_config, Context, Parachain, Relaychain, Step};
+use crate::config::{
+    get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, Step,
+};
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
 
@@ -44,6 +46,7 @@ use std::env;
 
 const PORTS_FILE: &str = "ports.json";
 const READY_FILE: &str = "ready.json";
+const VALIDATOR_ENV: (&str, &str) = ("ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION", "1");
 
 #[derive(Debug, Clone)]
 struct ChainArtifact {
@@ -95,7 +98,7 @@ pub async fn doppelganger_inner(
         let maybe_target_header_path = if let Some(at_block) = para.at_block() {
             let para_rpc = para
                 .rpc_endpoint()
-                .expect("rpc for parachain should be set. qed");
+                .expect("'rpc_endpoint' for parachain should be set when use 'bite_at' to get the target header. qed");
             let header = get_header_from_block(at_block, para_rpc).await?;
 
             let target_header_path = format!("{base_dir_str}/para-header.json");
@@ -136,20 +139,23 @@ pub async fn doppelganger_inner(
             .get(para_index)
             .expect("para_index should be valid. qed");
 
-        let sync_chain_name = if sync_chain.contains('/') {
-            // File path (custom para or paseo) — use the canonical chain string for naming
-            para.as_chain_string(&relay_chain.as_chain_string())
-        } else {
-            sync_chain.clone()
-        };
+        // let sync_chain_name = if sync_chain.contains('/') {
+        //     let parts: Vec<&str> = sync_chain.split('/').collect();
+        //     let name_parts: Vec<&str> = parts.last().unwrap().split('.').collect();
+        //     name_parts.first().unwrap().to_string()
+        // } else {
+        //     // is not a file
+        //     sync_chain.clone()
+        // };
 
-        let chain_spec_path = format!("{}/{}-spec.json", &base_dir_str, &sync_chain_name);
+        let sync_chain_name = para.as_chain_string(&relay_chain.as_chain_string());
+        let chain_spec_path = format!("{}/{}-spec.json", base_dir_str, sync_chain_name);
 
-        if para.is_custom() {
+       if para.is_custom() {
             // For custom paras, copy the user's chain spec and clear bootNodes
             // instead of running `doppelganger-parachain build-spec` which may not
             // understand arbitrary runtimes.
-            let spec_content = std::fs::read_to_string(&sync_chain)
+            let spec_content = tokio::fs::read_to_string(&sync_chain).await
                 .unwrap_or_else(|_| panic!("Failed to read custom chain spec: {}", &sync_chain));
             let mut spec_json: serde_json::Value = serde_json::from_str(&spec_content)
                 .unwrap_or_else(|_| panic!("Failed to parse custom chain spec JSON: {}", &sync_chain));
@@ -168,7 +174,7 @@ pub async fn doppelganger_inner(
         }
 
         // generate the data.tgz to use as snapshot
-        let snap_path = format!("{}/{}-snap.tgz", &base_dir_str, &sync_chain_name);
+        let snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain_name);
         trace!("snap_path: {snap_path}");
         generate_snap(&sync_db_path, &snap_path).await.unwrap();
 
@@ -192,7 +198,7 @@ pub async fn doppelganger_inner(
         ));
 
         para_artifacts.push(ChainArtifact {
-            cmd: context_para.doppelganger_cmd(),
+            cmd: context_para.cmd(),
             chain: if sync_chain.contains('/') {
                 para.as_chain_string(&relay_chain.as_chain_string())
             } else {
@@ -205,8 +211,11 @@ pub async fn doppelganger_inner(
         });
     }
 
+    let req_cores: u32 = paras_to.iter().fold(0u32, |acc, para| {
+        acc + get_assigned_cores(&relay_chain, para)
+    });
     let rc_default_overrides_path =
-        generate_default_overrides_for_rc(&base_dir_str, &relay_chain, &paras_to).await;
+        generate_default_overrides_for_rc(&base_dir_str, &relay_chain, &paras_to, req_cores).await;
     let rc_info_path = format!("{base_dir_str}/rc_info.txt");
     // RELAYCHAIN sync
 
@@ -241,7 +250,7 @@ pub async fn doppelganger_inner(
     // get the chain-spec (prod) and clean the bootnodes
     // relaychain
     let context_relay = Context::Relaychain;
-    let r_chain_spec_path = format!("{}/{}-spec.json", &base_dir_str, &sync_chain);
+    let r_chain_spec_path = format!("{}/{}-spec.json", base_dir_str, sync_chain);
     generate_chain_spec(
         ns.clone(),
         &r_chain_spec_path,
@@ -254,6 +263,8 @@ pub async fn doppelganger_inner(
     // remove `parachains` db
     let sync_chain_in_path = if sync_chain == "kusama" {
         "ksmcc3"
+    } else if sync_chain == "westend" {
+        "westend2"
     } else {
         sync_chain.as_str()
     };
@@ -270,11 +281,12 @@ pub async fn doppelganger_inner(
         .expect("remove parachains db should work");
 
     // generate the data.tgz to use as snapshot
-    let r_snap_path = format!("{}/{}-snap.tgz", &base_dir_str, &sync_chain);
+    let r_snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain);
     generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
 
     let relay_artifacts = ChainArtifact {
-        cmd: context_relay.doppelganger_cmd(),
+        // cmd: context_relay.doppelganger_cmd(),
+        cmd: context_relay.cmd(),
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
@@ -287,6 +299,7 @@ pub async fn doppelganger_inner(
         para_artifacts,
         Some(global_base_dir.clone()),
         database,
+        req_cores,
     )
     .await
     .map_err(|e| anyhow!(e.to_string()))?;
@@ -552,6 +565,7 @@ async fn generate_config(
     paras: Vec<ChainArtifact>,
     global_base_dir: Option<PathBuf>,
     database: &str,
+    req_cores: u32,
 ) -> Result<NetworkConfig, String> {
     let leaked_rust_log = env::var("RUST_LOG_RC").unwrap_or_else(|_| {
         String::from(
@@ -614,7 +628,8 @@ async fn generate_config(
     };
 
     // Alice + Bob + number of parachains
-    let num_validators = (2 + paras.len()).min(7);
+    // let num_validators = (2 + paras.len()).min(7);
+    let num_validators = (2 + req_cores).min(7) as usize;
 
     // config a new network with dynamic validators
     let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {
@@ -642,8 +657,16 @@ async fn generate_config(
 
         {
             let mut relay_builder = relay_builder
-                .with_validator(|node| node.with_name("alice").with_rpc_port(rpc_alice_port))
-                .with_validator(|node| node.with_name("bob").with_rpc_port(rpc_bob_port));
+                .with_validator(|node| {
+                    node.with_name("alice")
+                        .with_rpc_port(rpc_alice_port)
+                        .with_env(vec![VALIDATOR_ENV])
+                })
+                .with_validator(|node| {
+                    node.with_name("bob")
+                        .with_rpc_port(rpc_bob_port)
+                        .with_env(vec![VALIDATOR_ENV])
+                });
 
             let additional_validators = ["charlie", "dave", "ferdie", "eve", "one"];
             // Spawn validators based on total count, accounting for alice and bob already added
@@ -651,25 +674,15 @@ async fn generate_config(
                 .iter()
                 .take(num_validators.saturating_sub(2))
             {
-                relay_builder = relay_builder.with_validator(|node| node.with_name(*name));
+                relay_builder = relay_builder
+                    .with_validator(|node| node.with_name(*name).with_env(vec![VALIDATOR_ENV]));
             }
             relay_builder
         }
     });
 
     if !paras.is_empty() {
-        // TODO: enable for multiple paras
-        // let validation_context = Rc::new(RefCell::new(ValidationContext::default()));
         for para in paras {
-            // TODO: enable for multiple paras
-            // let builder = ParachainConfigBuilder::new(validation_context);
-            // let para_config = builder.with_id(1000)
-            // .with_chain(para.chain.as_str())
-            // .with_default_command(para.cmd.as_str())
-            // .with_chain_spec_path(PathBuf::from(para.spec_path.as_str()))
-            // .with_default_db_snapshot(PathBuf::from(para.snap_path.as_str()))
-            // .with_collator(|c| c.with_name("col-1000"));
-
             let (chain_spec_path, db_path) = if let Ok(ci_path) = env::var("ZOMBIE_BITE_CI_PATH") {
                 let chain_spec_path = PathBuf::from(para.spec_path.as_str());
                 let chain_spec_filename = chain_spec_path
@@ -727,6 +740,10 @@ async fn generate_config(
                 for extra in extra_args.split(',') {
                     para_default_args.push(extra.trim().into());
                 }
+            }
+
+            if para.chain.contains("asset-hub") {
+                para_default_args.push("--authoring=slot-based".into());
             }
 
             let para_id = para.para_id.expect("Para id should be available");
@@ -862,8 +879,8 @@ async fn generate_chain_spec(
 }
 
 async fn run_doppelganger_node(ns: DynNamespace, base_path: &Path) -> Result<(), String> {
-    let data_path = format!("{}/sync_db", &base_path.to_string_lossy());
-    let logs_path = format!("{}/sync.log", &base_path.to_string_lossy());
+    let data_path = format!("{}/sync_db", base_path.to_string_lossy());
+    let logs_path = format!("{}/sync.log", base_path.to_string_lossy());
     info!(
         "⛓  Syncing using warp, this could take a while. You can follow the logs with: \n\t
     tail -f {}",
@@ -885,7 +902,7 @@ async fn run_doppelganger_node(ns: DynNamespace, base_path: &Path) -> Result<(),
                     "-c",
                     format!(
                         "doppelganger -l doppelganger=debug --chain kusama --sync warp -d {} > {} 2>&1",
-                        &data_path, &logs_path
+                        data_path, logs_path
                     )
                     .as_str(),
                 ])
@@ -994,7 +1011,7 @@ mod test {
             para_id: Some(1000),
         };
 
-        let network_config = generate_config(relay, vec![ah], None, "rocksdb")
+        let network_config = generate_config(relay, vec![ah], None, "rocksdb", 3)
             .await
             .unwrap();
 
