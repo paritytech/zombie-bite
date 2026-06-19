@@ -703,11 +703,9 @@ impl ParachainConfig {
                 }),
                 "custom" => {
                     // validate chain / id
-                    let (Some(id), Some(chain_spec), Some(rpc_endpoint)) = (
-                        self.id,
-                        self.chain_spec.clone(),
-                        self.rpc_endpoint.clone(),
-                    ) else {
+                    let (Some(id), Some(chain_spec), Some(rpc_endpoint)) =
+                        (self.id, self.chain_spec.clone(), self.rpc_endpoint.clone())
+                    else {
                         panic!("Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required");
                     };
 
