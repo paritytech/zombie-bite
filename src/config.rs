@@ -704,16 +704,12 @@ impl ParachainConfig {
                 "custom" => {
                     // validate chain / id
                     let (Some(id), Some(chain_spec), Some(rpc_endpoint)) = (
-                        self.id.clone(),
+                        self.id,
                         self.chain_spec.clone(),
                         self.rpc_endpoint.clone(),
                     ) else {
                         panic!("Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required");
                     };
-
-                    // let id: u32 = id
-                    //     .parse()
-                    //     .unwrap_or_else(|_| panic!("Invalid custom para id: {}", id));
 
                     Some(Parachain::Custom {
                         maybe_override: self.runtime_override.clone(),

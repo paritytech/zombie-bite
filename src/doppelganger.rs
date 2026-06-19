@@ -157,10 +157,10 @@ pub async fn doppelganger_inner(
             // understand arbitrary runtimes.
             let spec_content = tokio::fs::read_to_string(&sync_chain)
                 .await
-                .unwrap_or_else(|_| panic!("Failed to read custom chain spec: {}", &sync_chain));
+                .unwrap_or_else(|_| panic!("Failed to read custom chain spec: {}", sync_chain));
             let mut spec_json: serde_json::Value = serde_json::from_str(&spec_content)
                 .unwrap_or_else(|_| {
-                    panic!("Failed to parse custom chain spec JSON: {}", &sync_chain)
+                    panic!("Failed to parse custom chain spec JSON: {}", sync_chain)
                 });
             spec_json["bootNodes"] = serde_json::Value::Array(vec![]);
             let contents = serde_json::to_string_pretty(&spec_json).unwrap();
