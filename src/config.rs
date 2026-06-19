@@ -464,6 +464,13 @@ impl Parachain {
         }
     }
 
+    pub fn req_cores(&self) -> Option<u32> {
+        match self {
+            Parachain::Custom { cores, .. } => Some(*cores),
+            _ => None,
+        }
+    }
+
     pub fn rpc_endpoint(&self) -> Option<&str> {
         match self {
             Parachain::AssetHub {
