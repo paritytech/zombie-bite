@@ -149,16 +149,32 @@ pub async fn doppelganger_inner(
         // };
 
         let sync_chain_name = para.as_chain_string(&relay_chain.as_chain_string());
-
         let chain_spec_path = format!("{}/{}-spec.json", base_dir_str, sync_chain_name);
-        generate_chain_spec(
-            ns.clone(),
-            &chain_spec_path,
-            &context_para.doppelganger_cmd(),
-            &sync_chain,
-        )
-        .await
-        .unwrap();
+
+        if para.is_custom() {
+            // For custom paras, copy the user's chain spec and clear bootNodes
+            // instead of running `doppelganger-parachain build-spec` which may not
+            // understand arbitrary runtimes.
+            let spec_content = tokio::fs::read_to_string(&sync_chain)
+                .await
+                .unwrap_or_else(|_| panic!("Failed to read custom chain spec: {}", sync_chain));
+            let mut spec_json: serde_json::Value = serde_json::from_str(&spec_content)
+                .unwrap_or_else(|_| {
+                    panic!("Failed to parse custom chain spec JSON: {}", sync_chain)
+                });
+            spec_json["bootNodes"] = serde_json::Value::Array(vec![]);
+            let contents = serde_json::to_string_pretty(&spec_json).unwrap();
+            tokio::fs::write(&chain_spec_path, contents).await.unwrap();
+        } else {
+            generate_chain_spec(
+                ns.clone(),
+                &chain_spec_path,
+                &context_para.doppelganger_cmd(),
+                &sync_chain,
+            )
+            .await
+            .unwrap();
+        }
 
         // generate the data.tgz to use as snapshot
         let snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain_name);

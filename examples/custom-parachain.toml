@@ -1,0 +1,10 @@
+[relaychain]
+network = "kusama"
+
+[[parachains]]
+type = "custom"
+para_id = 3392
+name = "yap-3392"
+rpc_endpoint = "wss://kusama-yap-3392.parity-chains.parity.io"
+chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
+# runtime_override = "/path/to/new_runtime.wasm"

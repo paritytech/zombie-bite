@@ -5,7 +5,7 @@ use std::{
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::warn;
+use tracing::{trace, warn};
 
 use crate::config::{Parachain, Relaychain, ZombieBiteConfig};
 
@@ -36,6 +36,8 @@ pub enum Commands {
         #[arg(long = "rc-bite-at", verbatim_doc_comment)]
         relay_bite_at: Option<u32>,
         /// Parachains to include: asset-hub, coretime, people, bridge-hub, collectives (comma-separated)
+        /// For custom parachains use: custom%<para_id>%<rpc_endpoint>%<chain_spec_path>%[req_cores]
+        /// Example: custom:3392:wss://kusama-yap-3392.example.com:/path/to/chain-spec.json
         #[arg(long, short = 'p', value_delimiter = ',', verbatim_doc_comment)]
         parachains: Option<Vec<String>>,
         /// Base path to use. if not provided we will check the env 'ZOMBIE_BITE_BASE_PATH' and if not present we will use `<cwd>_timestamp`
@@ -215,10 +217,13 @@ pub fn resolve_bite_config(
                     maybe_bite_at: None,
                     maybe_rpc_endpoint: None,
                 }),
+                s if s.starts_with("custom%") => {
+                    Some(resolve_custom_parachain(s))
+                }
                 unknown => {
                     warn!(
                         "⚠️  Warning: Unknown parachain '{}' will be ignored.
-                     Valid options are: asset-hub, coretime, people, bridge-hub, collectives",
+                     Valid options are: asset-hub, coretime, people, bridge-hub, collectives, custom%<para_id>%<rpc>%<chain_spec>%[req_cores]",
                         unknown
                     );
                     None
@@ -290,4 +295,98 @@ pub fn resolve_spawn_config(
         base_path: resolved_base_path,
         with_monitor: resolved_with_monitor,
     })
+}
+
+fn resolve_custom_parachain(s: &str) -> Parachain {
+    let parts: Vec<&str> = s.splitn(5, '%').collect();
+    trace!("custom parts: {parts:?}");
+    if parts.len() < 4 || parts.len() > 5 {
+        panic!(
+            "Custom parachain format must be custom%<para_id>%<rpc_endpoint>%<chain_spec_path>%[req_cores], got: {}",
+            s
+        );
+    }
+    let para_id: u32 = parts[1]
+        .parse()
+        .unwrap_or_else(|_| panic!("Invalid para_id '{}' in custom parachain", parts[1]));
+    let rpc_endpoint = parts[2].to_string();
+    let chain_spec = parts[3].to_string();
+    let name = format!("custom-{}", para_id);
+    let req_cores = if parts.len() == 5 {
+        parts[4]
+            .parse()
+            .unwrap_or_else(|_| panic!("Invalid req_cores '{}' in custom parachain", parts[4]))
+    } else {
+        // default to 1 core
+        1
+    };
+    Parachain::Custom {
+        id: para_id,
+        name,
+        chain_spec,
+        maybe_override: None,
+        maybe_bite_at: None,
+        maybe_rpc_endpoint: Some(rpc_endpoint),
+        cores: req_cores,
+    }
+}
+
+#[cfg(test)]
+mod test {
+    use super::*;
+    #[test]
+    fn custom_para_works() {
+        let s = "custom%3392%wss://kusama-yap-3392.example.com%/path/to/chain-spec.json";
+        let para = resolve_custom_parachain(s);
+        assert_eq!(para.id(), 3392, "para id should be valid");
+        assert_eq!(
+            para.rpc_endpoint(),
+            Some("wss://kusama-yap-3392.example.com"),
+            "rpc should match"
+        );
+        assert_eq!(
+            para.chain_spec(),
+            Some("/path/to/chain-spec.json"),
+            "chain-spec should match"
+        );
+    }
+
+    #[test]
+    fn custom_para_works_with_port_number() {
+        let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json";
+        let para = resolve_custom_parachain(s);
+        assert_eq!(
+            para.rpc_endpoint(),
+            Some("wss://kusama-yap-3392.example.com:1234"),
+            "rpc should match"
+        );
+    }
+
+    #[test]
+    fn custom_para_works_with_cores() {
+        let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%3";
+        let para = resolve_custom_parachain(s);
+        assert_eq!(para.req_cores(), Some(3), "cores should match");
+    }
+
+    #[test]
+    fn custom_para_works_with_default_cores() {
+        let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json";
+        let para = resolve_custom_parachain(s);
+        assert_eq!(para.req_cores(), Some(1), "cores should match");
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid para_id 'abc3392' in custom parachain")]
+    fn custom_para_id_parse_err() {
+        let s = "custom%abc3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%3";
+        let _para = resolve_custom_parachain(s);
+    }
+
+    #[test]
+    #[should_panic(expected = "Invalid req_cores 'abc' in custom parachain")]
+    fn custom_para_cores_parse_err() {
+        let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%abc";
+        let _para = resolve_custom_parachain(s);
+    }
 }

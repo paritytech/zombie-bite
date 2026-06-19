@@ -150,8 +150,13 @@ pub async fn sync_para(
 
     trace!("env: {env:?}");
 
+    // Custom parachains: use the provided chain spec file path directly
+    let chain_arg_for_custom;
     let dest_for_paseo = format!("{}/asset-hub-paseo.json", ns.base_dir().to_string_lossy(),);
-    let chain_arg = if chain == "asset-hub-paseo" {
+    let chain_arg = if let Some(spec_path) = parachain.chain_spec_path() {
+        chain_arg_for_custom = spec_path.to_string();
+        chain_arg_for_custom.as_str()
+    } else if chain == "asset-hub-paseo" {
         // get chain spec from https://paseo-r2.zondax.ch/chain-specs/paseo-asset-hub.json
         let response = reqwest::get(PASEO_ASSET_HUB_SPEC_URL)
             .await
