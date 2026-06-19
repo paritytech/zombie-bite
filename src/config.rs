@@ -402,7 +402,6 @@ impl Parachain {
             Parachain::BridgeHub { .. } => "bridge-hub",
             Parachain::Collectives { .. } => "collectives",
             Parachain::Custom { id, .. } => &id.to_string(),
-
         };
 
         format!("{para_part}-{relay_part}-local")
@@ -704,8 +703,11 @@ impl ParachainConfig {
                 }),
                 "custom" => {
                     // validate chain / id
-                    let (Some(id), Some(chain_spec), Some(rpc_endpoint)) = (self.id.clone(), self.chain_spec.clone(), self.rpc_endpoint.clone())
-                    else {
+                    let (Some(id), Some(chain_spec), Some(rpc_endpoint)) = (
+                        self.id.clone(),
+                        self.chain_spec.clone(),
+                        self.rpc_endpoint.clone(),
+                    ) else {
                         panic!("Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required");
                     };
 
@@ -1324,8 +1326,7 @@ network = "polkadot"
             maybe_override: None,
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
-            cores: 1
-
+            cores: 1,
         };
         assert_eq!(para.chain_spec_path(), Some("/path/to/spec.json"));
         assert!(para.is_custom());
@@ -1379,7 +1380,6 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: Some(3392),
             chain_spec: Some("/path/to/spec.json".to_string()),
             cores: None,
-
         };
 
         let para = config.to_parachain().unwrap();
@@ -1387,7 +1387,9 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
     }
 
     #[test]
-    #[should_panic(expected = "Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required")]
+    #[should_panic(
+        expected = "Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required"
+    )]
     fn custom_parachain_config_missing_para_id() {
         let config = ParachainConfig {
             parachain_type: "custom".to_string(),
@@ -1403,7 +1405,9 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
     }
 
     #[test]
-    #[should_panic(expected = "Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required")]
+    #[should_panic(
+        expected = "Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required"
+    )]
     fn custom_parachain_config_missing_chain_spec() {
         let config = ParachainConfig {
             parachain_type: "custom".to_string(),
@@ -1413,13 +1417,15 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             rpc_endpoint: Some("wss://example.com".to_string()),
             id: Some(3392),
             chain_spec: None,
-            cores: None
+            cores: None,
         };
         config.to_parachain();
     }
 
     #[test]
-    #[should_panic(expected = "Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required")]
+    #[should_panic(
+        expected = "Invalid custom parachain config, 'id', 'chain_spec' and 'rpc_endpoint' are required"
+    )]
     fn custom_parachain_config_missing_rpc_endpoint() {
         let config = ParachainConfig {
             parachain_type: "custom".to_string(),
