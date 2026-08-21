@@ -83,6 +83,26 @@ zombie-bite bite -d /tmp/base_path -r polkadot --parachains people,bridge-hub,co
 
 You can combine both options to override runtimes and select parachains in the same command. On success you'll have all artifacts needed to spawn the _bitten_ network.
 
+#### Carry a runtime upgrade (test the upgrade path, not just the runtime)
+
+`--rc-override` installs the runtime directly as state: the fork wakes up already upgraded. To test the *upgrade itself* — hash validation, version checks, and for parachains the relay-side PVF pre-checking and go-ahead — carry the runtime as an **authorized** upgrade instead:
+
+```sh
+# relay chain runtime under test
+zombie-bite bite -r kusama --rc-upgrade ./kusama_runtime.compact.compressed.wasm
+
+# parachain runtime under test (repeatable, format <para_id>=<wasm_path>)
+zombie-bite bite -r kusama -p asset-hub --para-upgrade 1000=./asset_hub_runtime.compact.compressed.wasm
+```
+
+The fork spawns on the live runtime with `System::AuthorizedUpgrade` seeded (the state a passed `authorize_upgrade` referendum leaves behind) and the blob stored next to `ready.json`. Since `apply_authorized_upgrade` is permissionless, no sudo is needed — this works on Kusama/Polkadot forks. Enact it yourself at any point, or let zombie-bite do it right after spawn and wait for the spec version to bump:
+
+```sh
+zombie-bite bite -r kusama --rc-upgrade ./kusama_runtime.wasm --and-spawn --apply-upgrade
+# or later, when spawning from existing artifacts
+zombie-bite spawn -d /tmp/base_path --apply-upgrade
+```
+
 #### Spawn
 
 Spawn a new instance of the _bited_ network with the following cmd:

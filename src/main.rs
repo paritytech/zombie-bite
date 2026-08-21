@@ -15,6 +15,7 @@ mod doppelganger;
 mod monit;
 mod overrides;
 mod sync;
+mod upgrade;
 mod utils;
 mod verify;
 
@@ -160,6 +161,9 @@ async fn main() -> Result<(), anyhow::Error> {
             and_spawn,
             with_monitor,
             database,
+            relay_upgrade,
+            para_upgrade,
+            apply_upgrade,
         } => {
             if with_monitor && !and_spawn {
                 error!("--with-monitor can only be used with --and-spawn");
@@ -175,7 +179,19 @@ async fn main() -> Result<(), anyhow::Error> {
                 base_path,
                 rc_sync_url,
                 and_spawn,
+                relay_upgrade,
+                para_upgrade,
+                apply_upgrade,
             )?;
+
+            if resolved_config.apply_upgrade && !resolved_config.and_spawn {
+                error!("--apply-upgrade can only be used with --and-spawn");
+                std::process::exit(1);
+            }
+            if resolved_config.apply_upgrade && resolved_config.upgrades.is_empty() {
+                error!("--apply-upgrade needs an upgrade to carry (--rc-upgrade / --para-upgrade)");
+                std::process::exit(1);
+            }
 
             debug!("{:?}", resolved_config.relaychain);
             doppelganger_inner(
@@ -183,6 +199,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 resolved_config.relaychain,
                 resolved_config.parachains,
                 &database,
+                &resolved_config.upgrades,
             )
             .await
             .expect("bite should work");
@@ -205,6 +222,11 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
 
+                if resolved_config.apply_upgrade {
+                    upgrade::apply_from_ready(&network, resolved_config.base_path.as_path())
+                        .await?;
+                }
+
                 post_spawn_loop(&stop_file, &network, true).await?;
 
                 tear_down_and_generate(&stop_file, step, network, resolved_config.base_path)
@@ -216,8 +238,10 @@ async fn main() -> Result<(), anyhow::Error> {
             base_path,
             with_monitor,
             step,
+            apply_upgrade,
         } => {
-            let resolved_config = resolve_spawn_config(config, base_path, with_monitor)?;
+            let resolved_config =
+                resolve_spawn_config(config, base_path, with_monitor, apply_upgrade)?;
             let step: Step = step.into();
             let base_path_str = resolved_config.base_path.to_string_lossy();
 
@@ -241,6 +265,10 @@ async fn main() -> Result<(), anyhow::Error> {
             ensure_startup_producing_blocks(&network).await;
 
             verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
+
+            if resolved_config.apply_upgrade {
+                upgrade::apply_from_ready(&network, resolved_config.base_path.as_path()).await?;
+            }
 
             // STOP file
             let stop_file = format!("{base_path_str}/{STOP_FILE}");

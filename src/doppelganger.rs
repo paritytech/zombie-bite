@@ -37,7 +37,7 @@ use crate::utils::{
 };
 
 use crate::config::{
-    get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, Step,
+    get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, Step, Upgrades,
 };
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
@@ -63,6 +63,7 @@ pub async fn doppelganger_inner(
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,
     database: &str,
+    upgrades: &Upgrades,
 ) -> Result<(), anyhow::Error> {
     // Star the node and wait until finish (with temp dir managed by us)
     info!(
@@ -91,8 +92,13 @@ pub async fn doppelganger_inner(
     // Parachain sync
     let mut syncs = vec![];
     for para in &paras_to {
-        let para_default_overrides_path =
-            generate_default_overrides_for_para(&base_dir_str, para, &relay_chain).await;
+        let para_default_overrides_path = generate_default_overrides_for_para(
+            &base_dir_str,
+            para,
+            &relay_chain,
+            upgrades.paras.get(&para.id()).map(String::as_str),
+        )
+        .await;
         let info_path = format!("{base_dir_str}/para-{}.txt", para.id());
 
         let maybe_target_header_path = if let Some(at_block) = para.at_block() {
@@ -217,8 +223,14 @@ pub async fn doppelganger_inner(
     let req_cores: u32 = paras_to.iter().fold(0u32, |acc, para| {
         acc + get_assigned_cores(&relay_chain, para)
     });
-    let rc_default_overrides_path =
-        generate_default_overrides_for_rc(&base_dir_str, &relay_chain, &paras_to, req_cores).await;
+    let rc_default_overrides_path = generate_default_overrides_for_rc(
+        &base_dir_str,
+        &relay_chain,
+        &paras_to,
+        req_cores,
+        upgrades.relay.as_deref(),
+    )
+    .await;
     let rc_info_path = format!("{base_dir_str}/rc_info.txt");
     // RELAYCHAIN sync
 
@@ -352,6 +364,28 @@ pub async fn doppelganger_inner(
         }
     }
 
+    // Carried upgrade blobs live next to ready.json (outside the step dirs, so
+    // they survive clean-up) and must match the seeded System::AuthorizedUpgrade.
+    let global_base_dir_str = global_base_dir.to_string_lossy();
+    if let Some(upgrade_wasm) = &upgrades.relay {
+        let blob_name = format!("{}-upgrade.wasm", relay_chain.as_chain_string());
+        let (blob, hash) = copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
+        ready_content["rc_upgrade_wasm"] = json!(blob);
+        ready_content["rc_upgrade_hash"] = json!(hash);
+    }
+    for para in &paras_to {
+        if let Some(upgrade_wasm) = upgrades.paras.get(&para.id()) {
+            let blob_name = format!(
+                "{}-upgrade.wasm",
+                para.as_chain_string(&relay_chain.as_chain_string())
+            );
+            let (blob, hash) =
+                copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
+            ready_content[format!("para_{}_upgrade_wasm", para.id())] = json!(blob);
+            ready_content[format!("para_{}_upgrade_hash", para.id())] = json!(hash);
+        }
+    }
+
     let alice_config = config
         .relaychain()
         .nodes()
@@ -391,6 +425,17 @@ pub async fn doppelganger_inner(
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
+}
+
+async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
+    let wasm = fs::read(from)
+        .await
+        .unwrap_or_else(|_| panic!("Error reading upgrade wasm from path {from}"));
+    fs::write(format!("{base_dir}/{blob_name}"), &wasm)
+        .await
+        .expect("write upgrade blob should works");
+    let hash = format!("0x{}", hex::encode(subhasher::blake2_256(&wasm[..])));
+    (blob_name.to_string(), hash)
 }
 
 /// Create the needed artifats for the next step

@@ -13,6 +13,26 @@ use crate::{
 
 use zombienet_sdk::generators::core_assignment;
 
+/// Seed `System::AuthorizedUpgrade` with the blob's hash, the state a passed
+/// `authorize_upgrade(hash)` referendum leaves behind. The permissionless
+/// `apply_authorized_upgrade(blob)` can then enact the upgrade through the
+/// production path, which needs no sudo (usable on Kusama/Polkadot forks).
+async fn inject_authorized_upgrade(injects: &mut Value, upgrade_wasm: &str) {
+    let wasm_content = fs::read(upgrade_wasm)
+        .await
+        .unwrap_or_else(|_| panic!("Error reading upgrade wasm from path {}", upgrade_wasm));
+    let auth_key = array_bytes::bytes2hex(
+        "",
+        substorager::storage_value_key(&b"System"[..], b"AuthorizedUpgrade"),
+    );
+    // CodeUpgradeAuthorization { code_hash, check_version: true }
+    let value = format!(
+        "{}01",
+        hex::encode(subhasher::blake2_256(&wasm_content[..]))
+    );
+    injects[auth_key] = Value::String(value);
+}
+
 /// Generate the injects for Session.NextKeys storage overrides for validators
 fn generate_next_keys_injects(
     validator_keys: &[&crate::utils::ValidatorKeys],
@@ -200,6 +220,7 @@ pub async fn generate_default_overrides_for_rc(
     relay: &Relaychain,
     paras: &Vec<Parachain>,
     req_cores: u32,
+    maybe_upgrade: Option<&str>,
 ) -> PathBuf {
     let num_validators = crate::config::num_validators_for_cores(req_cores);
     let validator_keys = get_validator_keys(num_validators as usize);
@@ -286,6 +307,10 @@ pub async fn generate_default_overrides_for_rc(
         }
     }
 
+    if let Some(upgrade_wasm) = maybe_upgrade {
+        inject_authorized_upgrade(&mut injects, upgrade_wasm).await;
+    }
+
     let full_content = json!({
         "overrides": overrides,
         "injects": injects
@@ -303,6 +328,7 @@ pub async fn generate_default_overrides_for_para(
     base_dir: &str,
     para: &Parachain,
     relay: &Relaychain,
+    maybe_upgrade: Option<&str>,
 ) -> PathBuf {
     // For AH determine key type based on relay chain: ed25519 for Polkadot, sr25519 for others
     let key_type = match (relay, para) {
@@ -315,7 +341,11 @@ pub async fn generate_default_overrides_for_para(
     let key_to_use = generate_collator_key_from_seed(&seed, key_type);
 
     // Generate the injects using the helper function
-    let injects = generate_collator_next_keys_injects(&key_to_use);
+    let mut injects = generate_collator_next_keys_injects(&key_to_use);
+
+    if let Some(upgrade_wasm) = maybe_upgrade {
+        inject_authorized_upgrade(&mut injects, upgrade_wasm).await;
+    }
 
     // <Pallet> <Item>
     // e.g Validator Validators
@@ -413,6 +443,7 @@ mod test {
             &crate::config::Relaychain::new("polakdot"),
             &paras,
             2,
+            None,
         )
         .await;
     }
@@ -528,6 +559,23 @@ mod test {
             overrides["5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b"],
             "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
         );
+    }
+
+    #[tokio::test]
+    async fn inject_authorized_upgrade_seeds_hash_and_check_version() {
+        let wasm_path = "/tmp/zombie-bite-test-upgrade.wasm";
+        let wasm = b"not-a-real-runtime";
+        tokio::fs::write(wasm_path, wasm).await.unwrap();
+
+        let mut injects = json!({});
+        inject_authorized_upgrade(&mut injects, wasm_path).await;
+
+        let key = array_bytes::bytes2hex(
+            "",
+            substorager::storage_value_key(&b"System"[..], b"AuthorizedUpgrade"),
+        );
+        let expected = format!("{}01", hex::encode(subhasher::blake2_256(&wasm[..])));
+        assert_eq!(injects[key], json!(expected));
     }
 
     #[test]
