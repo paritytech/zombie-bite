@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 // TODO: don't allow dead_code
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use futures::future::try_join_all;
 use futures::FutureExt;
 use serde_json::json;
@@ -45,7 +45,7 @@ use crate::sync::{sync_para, sync_relay_only};
 use std::env;
 
 const PORTS_FILE: &str = "ports.json";
-const READY_FILE: &str = "ready.json";
+pub const READY_FILE: &str = "ready.json";
 const VALIDATOR_ENV: (&str, &str) = ("ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION", "1");
 
 #[derive(Debug, Clone)]
@@ -335,13 +335,21 @@ pub async fn doppelganger_inner(
     }
 
     // ready to start
+    // The source rpc endpoints let the spawn step verify the fork actually
+    // diverged from the network it was bitten from.
     let mut ready_content = json!({
         "rc_start_block": rc_start_block,
+        "rc_source_rpc": relay_chain.rpc_endpoint(),
     });
 
     // Add all parachain start blocks
     for (key, value) in para_start_blocks {
         ready_content[key] = value;
+    }
+    for para in &paras_to {
+        if let Some(source_rpc) = para.rpc_endpoint() {
+            ready_content[format!("para_{}_source_rpc", para.id())] = json!(source_rpc);
+        }
     }
 
     let alice_config = config
@@ -826,10 +834,41 @@ pub async fn spawn(
     )
     .unwrap();
 
+    validate_parachain_specs(&network_config)?;
+
     orchestrator
         .spawn(network_config)
         .await
         .map_err(|e| anyhow!(e.to_string()))
+}
+
+/// A parachain with a `chain_spec_path` but no `chain` silently shares one
+/// spec with every other parachain (last one wins) - every collator ends up
+/// running the same chain. Reject it, and reject duplicated `chain` names for
+/// the same reason.
+fn validate_parachain_specs(
+    network_config: &zombienet_configuration::NetworkConfig,
+) -> Result<(), anyhow::Error> {
+    let mut seen_chains: Vec<&str> = vec![];
+    for para in network_config.parachains() {
+        let chain = para.chain().map(|c| c.as_str());
+        if para.chain_spec_path().is_some() && chain.is_none() {
+            bail!(
+                "parachain {} defines 'chain_spec_path' but no 'chain'; without a unique 'chain' per parachain zombienet applies one spec to every parachain",
+                para.id()
+            );
+        }
+        if let Some(chain) = chain {
+            if seen_chains.contains(&chain) {
+                bail!(
+                    "parachain {} reuses chain name '{chain}'; each parachain needs a unique 'chain' or they will share one chain spec",
+                    para.id()
+                );
+            }
+            seen_chains.push(chain);
+        }
+    }
+    Ok(())
 }
 
 async fn generate_snap(data_path: &str, snap_path: &str) -> Result<(), anyhow::Error> {
@@ -971,6 +1010,58 @@ mod test {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
+    }
+
+    fn config_with_paras(
+        paras: Vec<(u32, Option<&str>, Option<&str>)>, // (id, chain, chain_spec_path)
+    ) -> NetworkConfig {
+        let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {
+            r.with_chain("polkadot")
+                .with_default_command("polkadot")
+                .with_validator(|node| node.with_name("alice"))
+                .with_validator(|node| node.with_name("bob"))
+        });
+
+        for (id, chain, spec_path) in paras {
+            config = config.with_parachain(|p| {
+                let mut p = p.with_id(id).with_default_command("polkadot-parachain");
+                if let Some(chain) = chain {
+                    p = p.with_chain(chain);
+                }
+                if let Some(spec_path) = spec_path {
+                    p = p.with_chain_spec_path(spec_path);
+                }
+                p.with_collator(|c| c.with_name(format!("col-{id}").as_str()))
+            });
+        }
+
+        config.build().unwrap()
+    }
+
+    #[test]
+    fn validate_rejects_chain_spec_path_without_chain() {
+        let config = config_with_paras(vec![(1000, None, Some("/tmp/spec.json"))]);
+        let err = validate_parachain_specs(&config).unwrap_err();
+        assert!(err.to_string().contains("no 'chain'"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_rejects_duplicated_chain_names() {
+        let config = config_with_paras(vec![
+            (1000, Some("asset-hub"), Some("/tmp/a.json")),
+            (1005, Some("asset-hub"), Some("/tmp/b.json")),
+        ]);
+        let err = validate_parachain_specs(&config).unwrap_err();
+        assert!(err.to_string().contains("reuses chain name"), "got: {err}");
+    }
+
+    #[test]
+    fn validate_accepts_unique_chains() {
+        let config = config_with_paras(vec![
+            (1000, Some("asset-hub"), Some("/tmp/a.json")),
+            (1005, Some("coretime"), Some("/tmp/b.json")),
+        ]);
+        assert!(validate_parachain_specs(&config).is_ok());
     }
 
     #[tokio::test]

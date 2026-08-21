@@ -16,6 +16,7 @@ mod monit;
 mod overrides;
 mod sync;
 mod utils;
+mod verify;
 
 use cli::{get_base_path, resolve_bite_config, resolve_spawn_config, Args, Commands};
 use config::Relaychain;
@@ -202,6 +203,8 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 ensure_startup_producing_blocks(&network).await;
 
+                verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
+
                 post_spawn_loop(&stop_file, &network, true).await?;
 
                 tear_down_and_generate(&stop_file, step, network, resolved_config.base_path)
@@ -236,6 +239,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     .expect("spawn should works");
 
             ensure_startup_producing_blocks(&network).await;
+
+            verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
 
             // STOP file
             let stop_file = format!("{base_path_str}/{STOP_FILE}");
