@@ -630,9 +630,8 @@ async fn generate_config(
         get_random_port().await
     };
 
-    // Alice + Bob + number of parachains
-    // let num_validators = (2 + paras.len()).min(7);
-    let num_validators = (2 + req_cores).min(7) as usize;
+    // Must match the validator set installed by the state overrides.
+    let num_validators = crate::config::num_validators_for_cores(req_cores) as usize;
 
     // config a new network with dynamic validators
     let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {

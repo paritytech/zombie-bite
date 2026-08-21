@@ -158,6 +158,14 @@ type MaybeChainSpec = Option<String>;
 // bridge (1002): 1
 // collectives (1001): 1
 
+/// Dev validators for a bitten relay: one per requested core plus one spare,
+/// clamped between the two nodes the spawner always starts (alice, bob) and
+/// the seven well-known dev accounts. Used by both the state overrides and the
+/// spawner so the validator set in state always matches the nodes running.
+pub fn num_validators_for_cores(req_cores: u32) -> u32 {
+    (1 + req_cores).clamp(2, 7)
+}
+
 pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain) -> u32 {
     match para {
         Parachain::AssetHub { .. } => 3,

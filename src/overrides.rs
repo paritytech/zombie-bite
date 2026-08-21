@@ -93,11 +93,10 @@ pub fn generate_rc_overrides(validator_keys: &[&crate::utils::ValidatorKeys]) ->
         .collect::<Vec<_>>()
         .join("");
 
-    let validator_groups_count_hex = format!("{:02x}", num_validators * 4); // Each group entry is 4 bytes
-    let validator_groups: String = (0..num_validators)
-        .map(|i| format!("{:02x}000000", i))
-        .collect::<Vec<_>>()
-        .join("");
+    // ValidatorGroups is Vec<Vec<ValidatorIndex>>, so each single-validator group
+    // carries its own compact length prefix.
+    let validator_groups: Vec<Vec<u32>> = (0..num_validators as u32).map(|i| vec![i]).collect();
+    let validator_groups = array_bytes::bytes2hex("", validator_groups.encode());
 
     // Build para validator keys (same as authority discovery for our purposes)
     let para_validator_keys: String = validator_keys
@@ -126,9 +125,7 @@ pub fn generate_rc_overrides(validator_keys: &[&crate::utils::ValidatorKeys]) ->
         // Staking Invulnerables (dynamic list)
         "5f3e4907f716ac89b6347d15ececedca5579297f4dfb9609e7e4c2ebab9ce40a": format!("{}{}", validator_count_hex, stash_list),
         // paraScheduler validatorGroup (dynamic groups based on validator count)
-        "94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db": format!("{}{}", validator_groups_count_hex, validator_groups),
-        // paraScheduler claimQueue (empty, will auto-fill)
-        "94eadf0156a8ad5156507773d0471e4a49f6c9aa90c04982c05388649310f22f": "040000000000",
+        "94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db": validator_groups,
         // paraShared activeValidatorIndices (dynamic)
         "b341e3a63e58a188839b242d17f8c9f82586833f834350b4d435d5fd269ecc8b": format!("{}{}", validator_count_hex, validator_indices),
         // paraShared activeValidatorKeys (dynamic)
@@ -137,8 +134,6 @@ pub fn generate_rc_overrides(validator_keys: &[&crate::utils::ValidatorKeys]) ->
         "2099d7f109d6e535fb000bba623fd4409f99a2ce711f3a31b2fc05604c93f179": format!("{}{}", validator_count_hex, authority_discovery_keys),
         // authorityDiscovery nextKeys (dynamic)
         "2099d7f109d6e535fb000bba623fd4404c014e6bf8b8c2c011e7290b85696bb3": format!("{}{}", validator_count_hex, authority_discovery_keys),
-        // paraScheduler availabilityCores (1 core, free)
-        "94eadf0156a8ad5156507773d0471e4ab8ebad86f546c7e0b135a4212aace339": "0400",
         // Sudo Key (Alice)
         "5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b": "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
     });
@@ -206,8 +201,7 @@ pub async fn generate_default_overrides_for_rc(
     paras: &Vec<Parachain>,
     req_cores: u32,
 ) -> PathBuf {
-    // The number of required validators, is equal the number of requested cores by paras + 1
-    let num_validators = (1 + req_cores).min(7);
+    let num_validators = crate::config::num_validators_for_cores(req_cores);
     let validator_keys = get_validator_keys(num_validators as usize);
 
     let next_keys_injects = generate_next_keys_injects(&validator_keys);
@@ -504,6 +498,17 @@ mod test {
         assert_eq!(
             overrides["5f3e4907f716ac89b6347d15ececedca5579297f4dfb9609e7e4c2ebab9ce40a"],
             "08be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25ffe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e"
+        );
+
+        // ParaScheduler ValidatorGroups: Vec<Vec<ValidatorIndex>>, two groups of one
+        let expected_groups: Vec<Vec<u32>> = vec![vec![0], vec![1]];
+        assert_eq!(
+            overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
+            array_bytes::bytes2hex("", expected_groups.encode())
+        );
+        assert_eq!(
+            overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
+            "0804000000000401000000"
         );
 
         // Para Id Parachains
