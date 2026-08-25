@@ -162,6 +162,8 @@ type MaybeChainSpec = Option<String>;
 /// clamped between the two nodes the spawner always starts (alice, bob) and
 /// the seven well-known dev accounts. Used by both the state overrides and the
 /// spawner so the validator set in state always matches the nodes running.
+// TODO: the upper bound is only there because we reuse the well-known dev
+// accounts; generating keys would let a fork scale past 7 validators.
 pub fn num_validators_for_cores(req_cores: u32) -> u32 {
     (1 + req_cores).clamp(2, 7)
 }

@@ -22,6 +22,7 @@ use tar::Builder;
 
 use tracing::debug;
 use tracing::{info, trace};
+use zombienet_configuration::shared::types::AssetLocation;
 use zombienet_configuration::NetworkConfigBuilder;
 use zombienet_orchestrator::network::Network;
 use zombienet_orchestrator::Orchestrator;
@@ -879,7 +880,7 @@ pub async fn spawn(
     )
     .unwrap();
 
-    validate_parachain_specs(&network_config)?;
+    validate_parachain_specs(&network_config).await?;
 
     orchestrator
         .spawn(network_config)
@@ -887,31 +888,43 @@ pub async fn spawn(
         .map_err(|e| anyhow!(e.to_string()))
 }
 
-/// A parachain with a `chain_spec_path` but no `chain` silently shares one
-/// spec with every other parachain (last one wins) - every collator ends up
-/// running the same chain. Reject it, and reject duplicated `chain` names for
-/// the same reason.
-fn validate_parachain_specs(
+/// Two parachains resolving to the same chain-spec identity share one spec
+/// (last one wins) and every collator silently runs the same chain. The
+/// identity is `chain` when set, else the `id` of the supplied chain-spec,
+/// which is what zombienet uses when no `chain` is given.
+async fn validate_parachain_specs(
     network_config: &zombienet_configuration::NetworkConfig,
 ) -> Result<(), anyhow::Error> {
-    let mut seen_chains: Vec<&str> = vec![];
+    let mut seen: Vec<(String, u32)> = vec![];
     for para in network_config.parachains() {
-        let chain = para.chain().map(|c| c.as_str());
-        if para.chain_spec_path().is_some() && chain.is_none() {
+        let identity = if let Some(chain) = para.chain() {
+            chain.as_str().to_string()
+        } else if let Some(AssetLocation::FilePath(path)) = para.chain_spec_path() {
+            let spec = fs::read_to_string(path)
+                .await
+                .map_err(|e| anyhow!("parachain {}: can't read chain-spec: {e}", para.id()))?;
+            let spec: serde_json::Value = serde_json::from_str(&spec)
+                .map_err(|e| anyhow!("parachain {}: invalid chain-spec json: {e}", para.id()))?;
+            spec["id"]
+                .as_str()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "parachain {} has neither 'chain' nor an 'id' in its chain-spec",
+                        para.id()
+                    )
+                })?
+                .to_string()
+        } else {
+            continue;
+        };
+
+        if let Some((_, other)) = seen.iter().find(|(seen, _)| *seen == identity) {
             bail!(
-                "parachain {} defines 'chain_spec_path' but no 'chain'; without a unique 'chain' per parachain zombienet applies one spec to every parachain",
+                "parachains {other} and {} both resolve to chain '{identity}', so they would share one chain spec",
                 para.id()
             );
         }
-        if let Some(chain) = chain {
-            if seen_chains.contains(&chain) {
-                bail!(
-                    "parachain {} reuses chain name '{chain}'; each parachain needs a unique 'chain' or they will share one chain spec",
-                    para.id()
-                );
-            }
-            seen_chains.push(chain);
-        }
+        seen.push((identity, para.id()));
     }
     Ok(())
 }
@@ -1083,30 +1096,47 @@ mod test {
         config.build().unwrap()
     }
 
-    #[test]
-    fn validate_rejects_chain_spec_path_without_chain() {
-        let config = config_with_paras(vec![(1000, None, Some("/tmp/spec.json"))]);
-        let err = validate_parachain_specs(&config).unwrap_err();
-        assert!(err.to_string().contains("no 'chain'"), "got: {err}");
+    async fn write_spec(path: &str, id: &str) {
+        fs::write(path, format!(r#"{{"id":"{id}"}}"#))
+            .await
+            .unwrap();
     }
 
-    #[test]
-    fn validate_rejects_duplicated_chain_names() {
+    #[tokio::test]
+    async fn validate_rejects_duplicated_chain_names() {
         let config = config_with_paras(vec![
             (1000, Some("asset-hub"), Some("/tmp/a.json")),
             (1005, Some("asset-hub"), Some("/tmp/b.json")),
         ]);
-        let err = validate_parachain_specs(&config).unwrap_err();
-        assert!(err.to_string().contains("reuses chain name"), "got: {err}");
+        let err = validate_parachain_specs(&config).await.unwrap_err();
+        assert!(
+            err.to_string().contains("share one chain spec"),
+            "got: {err}"
+        );
     }
 
-    #[test]
-    fn validate_accepts_unique_chains() {
+    #[tokio::test]
+    async fn validate_accepts_unique_chains() {
         let config = config_with_paras(vec![
             (1000, Some("asset-hub"), Some("/tmp/a.json")),
             (1005, Some("coretime"), Some("/tmp/b.json")),
         ]);
-        assert!(validate_parachain_specs(&config).is_ok());
+        assert!(validate_parachain_specs(&config).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_uses_spec_id_when_chain_is_absent() {
+        let (dup_a, dup_b) = ("/tmp/zb-dup-a.json", "/tmp/zb-dup-b.json");
+        write_spec(dup_a, "asset-hub-kusama").await;
+        write_spec(dup_b, "asset-hub-kusama").await;
+
+        let config = config_with_paras(vec![(1000, None, Some(dup_a)), (1005, None, Some(dup_b))]);
+        let err = validate_parachain_specs(&config).await.unwrap_err();
+        assert!(err.to_string().contains("asset-hub-kusama"), "got: {err}");
+
+        write_spec(dup_b, "coretime-kusama").await;
+        let config = config_with_paras(vec![(1000, None, Some(dup_a)), (1005, None, Some(dup_b))]);
+        assert!(validate_parachain_specs(&config).await.is_ok());
     }
 
     #[tokio::test]

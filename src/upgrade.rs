@@ -7,7 +7,7 @@
 //! call goes through the full cumulus flow: relay-side PVF pre-checking,
 //! go-ahead signal, and enactment.
 
-use std::{path::Path, time::Duration};
+use std::{env, path::Path, time::Duration};
 
 use anyhow::{anyhow, bail};
 use serde_json::Value;
@@ -22,9 +22,17 @@ use zombienet_sdk::{
     LocalFileSystem, Network,
 };
 
-/// Parachain upgrades wait for relay-side PVF pre-checking plus the go-ahead
-/// signal before enacting.
+/// A relay upgrade enacts within a block or two, but a parachain one waits for
+/// relay-side PVF pre-checking plus `validation_upgrade_delay`, which depends on
+/// the bitten chain's `HostConfiguration` - hence the wide default.
 const UPGRADE_TIMEOUT_SECS: u64 = 900;
+
+fn upgrade_timeout_secs() -> u64 {
+    env::var("ZOMBIE_BITE_UPGRADE_TIMEOUT")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(UPGRADE_TIMEOUT_SECS)
+}
 
 async fn spec_version(client: &RpcClient) -> Result<u64, anyhow::Error> {
     let version: Value = client
@@ -67,6 +75,7 @@ pub async fn apply_authorized_upgrade(
         })?;
     info!("{chain}: apply_authorized_upgrade submitted ({tx_hash})");
 
+    let timeout = upgrade_timeout_secs();
     let started = std::time::Instant::now();
     loop {
         tokio::time::sleep(Duration::from_secs(10)).await;
@@ -75,9 +84,9 @@ pub async fn apply_authorized_upgrade(
             info!("✅ {chain}: runtime upgraded, spec version {initial_version} -> {current}");
             return Ok(());
         }
-        if started.elapsed().as_secs() > UPGRADE_TIMEOUT_SECS {
+        if started.elapsed().as_secs() > timeout {
             bail!(
-                "{chain}: spec version still {current} after {UPGRADE_TIMEOUT_SECS}s, the upgrade did not enact"
+                "{chain}: spec version still {current} after {timeout}s, the upgrade did not enact"
             );
         }
     }

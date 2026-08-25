@@ -40,7 +40,7 @@ pub enum Commands {
         #[arg(long = "rc-upgrade", verbatim_doc_comment)]
         relay_upgrade: Option<String>,
         /// Same as --rc-upgrade but for a parachain, format: <para_id>=<wasm_path>
-        /// (can be repeated)
+        /// Can be set multiple times, once per para to upgrade.
         #[arg(long = "para-upgrade", verbatim_doc_comment)]
         para_upgrade: Vec<String>,
         /// After spawn (requires --and-spawn), submit apply_authorized_upgrade

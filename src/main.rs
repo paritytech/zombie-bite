@@ -3,9 +3,10 @@ use std::{
     time::Duration,
 };
 
+use anyhow::bail;
 use clap::Parser;
 use futures::StreamExt;
-use tracing::{debug, error, info, level_filters::LevelFilter, trace, warn};
+use tracing::{debug, info, level_filters::LevelFilter, trace, warn};
 use tracing_subscriber::EnvFilter;
 use zombienet_sdk::{LocalFileSystem, Network, NetworkNode};
 
@@ -166,8 +167,7 @@ async fn main() -> Result<(), anyhow::Error> {
             apply_upgrade,
         } => {
             if with_monitor && !and_spawn {
-                error!("--with-monitor can only be used with --and-spawn");
-                std::process::exit(1);
+                bail!("--with-monitor can only be used with --and-spawn");
             }
 
             let resolved_config = resolve_bite_config(
@@ -185,12 +185,10 @@ async fn main() -> Result<(), anyhow::Error> {
             )?;
 
             if resolved_config.apply_upgrade && !resolved_config.and_spawn {
-                error!("--apply-upgrade can only be used with --and-spawn");
-                std::process::exit(1);
+                bail!("--apply-upgrade can only be used with --and-spawn");
             }
             if resolved_config.apply_upgrade && resolved_config.upgrades.is_empty() {
-                error!("--apply-upgrade needs an upgrade to carry (--rc-upgrade / --para-upgrade)");
-                std::process::exit(1);
+                bail!("--apply-upgrade needs an upgrade to carry (--rc-upgrade / --para-upgrade)");
             }
 
             debug!("{:?}", resolved_config.relaychain);
