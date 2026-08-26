@@ -107,6 +107,11 @@ zombie-bite spawn -d /tmp/base_path --apply-upgrade
 
 - `--para-cores <para_id>=<cores>` overrides how many cores a parachain gets (defaults mirror the live networks, e.g. asset-hub takes 3 for elastic scaling). The relay's validator count follows the total.
 - `--keep-messaging-state` keeps the inherited HRMP/DMP state instead of clearing it. Only correct when the relay's parachains are exactly the ones being bitten, so both snapshots agree on channel heads; on a shared relay the mismatch makes cumulus panic with `HRMP head mismatch`.
+- `--publish-bootnodes` writes the spawned network's own node addresses into the published chain-specs, so the artifacts are dialable from another machine (specs otherwise ship with `bootNodes: []`).
+
+#### Bundle manifest
+
+A bite writes a `manifest.json` next to `ready.json` recording, per chain, the bite block, source RPC, spec and snapshot files with sizes, any carried upgrade, and the `doppelganger` versions that produced the snapshots. A later `spawn` warns when the local binaries differ, because a snapshot from a newer node fails to restore in ways that otherwise look like corruption.
 
 #### Overrides are checked against the runtime
 

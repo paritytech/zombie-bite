@@ -58,6 +58,10 @@ pub enum Commands {
         /// Can be set multiple times, once per para.
         #[arg(long = "para-cores", verbatim_doc_comment)]
         para_cores: Vec<String>,
+        /// Write the spawned network's own node addresses into the published
+        /// chain-specs, so the artifacts are dialable from outside the box.
+        #[arg(long, default_value_t = false, verbatim_doc_comment)]
+        publish_bootnodes: bool,
         /// If provided we will _bite_ the live network at the supplied block hieght
         #[arg(long = "rc-bite-at", verbatim_doc_comment)]
         relay_bite_at: Option<u32>,
@@ -102,6 +106,10 @@ pub enum Commands {
         /// and wait until it enacts.
         #[arg(long, default_value_t = false, verbatim_doc_comment)]
         apply_upgrade: bool,
+        /// Write the spawned network's own node addresses into the published
+        /// chain-specs, so the artifacts are dialable from outside the box.
+        #[arg(long, default_value_t = false, verbatim_doc_comment)]
+        publish_bootnodes: bool,
     },
     /// [Helper] Generate artifacts to be used by the next step (only 'spawn' and 'post' allowed)
     GenerateArtifacts {
@@ -166,6 +174,7 @@ pub struct ResolvedBiteConfig {
     pub base_path: PathBuf,
     pub and_spawn: bool,
     pub apply_upgrade: bool,
+    pub publish_bootnodes: bool,
     pub opts: BiteOptions,
 }
 
@@ -174,6 +183,7 @@ pub struct ResolvedSpawnConfig {
     pub base_path: PathBuf,
     pub with_monitor: bool,
     pub apply_upgrade: bool,
+    pub publish_bootnodes: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -191,6 +201,7 @@ pub fn resolve_bite_config(
     apply_upgrade: bool,
     keep_messaging_state: bool,
     para_cores: Vec<String>,
+    publish_bootnodes: bool,
 ) -> Result<ResolvedBiteConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -364,6 +375,7 @@ pub fn resolve_bite_config(
         base_path: resolved_base_path,
         and_spawn: resolved_and_spawn,
         apply_upgrade: resolved_apply_upgrade,
+        publish_bootnodes,
         opts: BiteOptions {
             upgrades,
             cores,
@@ -377,6 +389,7 @@ pub fn resolve_spawn_config(
     base_path: Option<String>,
     with_monitor: bool,
     apply_upgrade: bool,
+    publish_bootnodes: bool,
 ) -> Result<ResolvedSpawnConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -413,6 +426,7 @@ pub fn resolve_spawn_config(
         base_path: resolved_base_path,
         with_monitor: resolved_with_monitor,
         apply_upgrade: resolved_apply_upgrade,
+        publish_bootnodes,
     })
 }
 

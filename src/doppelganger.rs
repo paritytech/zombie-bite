@@ -40,6 +40,7 @@ use crate::utils::{
 use crate::config::{
     get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain, Step,
 };
+use crate::manifest::{self, ChainEntry, Manifest};
 use crate::metadata::ChainMetadata;
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
@@ -329,8 +330,8 @@ pub async fn doppelganger_inner(
     };
 
     let config = generate_config(
-        relay_artifacts,
-        para_artifacts,
+        relay_artifacts.clone(),
+        para_artifacts.clone(),
         Some(global_base_dir.clone()),
         database,
         req_cores,
@@ -441,9 +442,78 @@ pub async fn doppelganger_inner(
     )
     .await;
 
+    let manifest = build_manifest(
+        &relay_chain,
+        &paras_to,
+        &ready_content,
+        &relay_artifacts,
+        &para_artifacts,
+    )
+    .await;
+    manifest.write(&global_base_dir).await?;
+
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
+}
+
+async fn build_manifest(
+    relay_chain: &Relaychain,
+    paras_to: &[Parachain],
+    ready: &serde_json::Value,
+    relay_artifacts: &ChainArtifact,
+    para_artifacts: &[ChainArtifact],
+) -> Manifest {
+    let file_name = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+    };
+
+    let relay = ChainEntry {
+        chain: relay_chain.as_chain_string(),
+        para_id: None,
+        bite_block: ready["rc_start_block"].as_u64(),
+        source_rpc: ready["rc_source_rpc"].as_str().map(str::to_string),
+        spec_file: file_name(&relay_artifacts.spec_path),
+        snapshot_file: file_name(&relay_artifacts.snap_path),
+        snapshot_bytes: manifest::file_size(&relay_artifacts.snap_path).await,
+        upgrade_file: ready["rc_upgrade_wasm"].as_str().map(str::to_string),
+        upgrade_hash: ready["rc_upgrade_hash"].as_str().map(str::to_string),
+    };
+
+    let mut parachains = vec![];
+    for (index, para) in paras_to.iter().enumerate() {
+        let id = para.id();
+        let artifact = para_artifacts.get(index);
+        parachains.push(ChainEntry {
+            chain: para.as_chain_string(&relay_chain.as_chain_string()),
+            para_id: Some(id),
+            bite_block: ready[format!("para_{id}_start_block")].as_u64(),
+            source_rpc: ready[format!("para_{id}_source_rpc")]
+                .as_str()
+                .map(str::to_string),
+            spec_file: artifact.and_then(|a| file_name(&a.spec_path)),
+            snapshot_file: artifact.and_then(|a| file_name(&a.snap_path)),
+            snapshot_bytes: match artifact {
+                Some(a) => manifest::file_size(&a.snap_path).await,
+                None => None,
+            },
+            upgrade_file: ready[format!("para_{id}_upgrade_wasm")]
+                .as_str()
+                .map(str::to_string),
+            upgrade_hash: ready[format!("para_{id}_upgrade_hash")]
+                .as_str()
+                .map(str::to_string),
+        });
+    }
+
+    Manifest {
+        created_at: manifest::now_unix(),
+        relay,
+        parachains,
+        binaries: manifest::binary_versions().await,
+    }
 }
 
 async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
@@ -944,6 +1014,70 @@ async fn validate_parachain_specs(
         }
         seen.push((identity, para.id()));
     }
+    Ok(())
+}
+
+/// Write the spawned network's own node addresses into the chain-specs the
+/// artifacts are published from.
+///
+/// `generate_chain_spec` clears `bootNodes`, which is safe but leaves a
+/// published spec unusable off the box: the peer wiring only exists in the
+/// spawned nodes' arguments. Filling in the running nodes' multiaddrs makes the
+/// artifacts dialable without every consumer patching the specs itself.
+pub async fn publish_bootnodes(
+    network: &Network<LocalFileSystem>,
+    base_path: &Path,
+    step: Step,
+) -> Result<(), anyhow::Error> {
+    let spec_dir = format!("{}/{}", base_path.to_string_lossy(), step.dir_from());
+
+    let relay_nodes: Vec<String> = network
+        .relaychain()
+        .nodes()
+        .iter()
+        .map(|node| node.multiaddr().to_string())
+        .collect();
+    write_bootnodes(
+        &format!("{spec_dir}/{}-spec.json", network.relaychain().chain()),
+        &relay_nodes,
+    )
+    .await?;
+
+    for para in network.parachains() {
+        let Some(chain_id) = para.chain_id() else {
+            warn!(
+                "para {}: no chain id, can't tell which spec to write bootnodes into",
+                para.para_id()
+            );
+            continue;
+        };
+        let nodes: Vec<String> = para
+            .collators()
+            .iter()
+            .map(|node| node.multiaddr().to_string())
+            .collect();
+        write_bootnodes(&format!("{spec_dir}/{chain_id}-spec.json"), &nodes).await?;
+    }
+
+    Ok(())
+}
+
+async fn write_bootnodes(spec_path: &str, nodes: &[String]) -> Result<(), anyhow::Error> {
+    if nodes.is_empty() {
+        warn!("{spec_path}: no running nodes to use as bootnodes");
+        return Ok(());
+    }
+    let Ok(content) = fs::read_to_string(spec_path).await else {
+        warn!("{spec_path}: chain-spec not found, skipping bootnodes");
+        return Ok(());
+    };
+    let mut spec: serde_json::Value = serde_json::from_str(&content)?;
+    spec["bootNodes"] = json!(nodes);
+    fs::write(spec_path, serde_json::to_string_pretty(&spec)?).await?;
+    info!(
+        "{spec_path}: bootNodes set to the spawned network ({})",
+        nodes.len()
+    );
     Ok(())
 }
 

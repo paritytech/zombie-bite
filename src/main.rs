@@ -13,6 +13,7 @@ use zombienet_sdk::{LocalFileSystem, Network, NetworkNode};
 mod cli;
 mod config;
 mod doppelganger;
+mod manifest;
 mod metadata;
 mod monit;
 mod overrides;
@@ -168,6 +169,7 @@ async fn main() -> Result<(), anyhow::Error> {
             apply_upgrade,
             keep_messaging_state,
             para_cores,
+            publish_bootnodes,
         } => {
             if with_monitor && !and_spawn {
                 bail!("--with-monitor can only be used with --and-spawn");
@@ -187,6 +189,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 apply_upgrade,
                 keep_messaging_state,
                 para_cores,
+                publish_bootnodes,
             )?;
 
             if resolved_config.apply_upgrade && !resolved_config.and_spawn {
@@ -225,6 +228,15 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
 
+                if resolved_config.publish_bootnodes {
+                    doppelganger::publish_bootnodes(
+                        &network,
+                        resolved_config.base_path.as_path(),
+                        step,
+                    )
+                    .await?;
+                }
+
                 if resolved_config.apply_upgrade {
                     upgrade::apply_from_ready(&network, resolved_config.base_path.as_path())
                         .await?;
@@ -242,9 +254,15 @@ async fn main() -> Result<(), anyhow::Error> {
             with_monitor,
             step,
             apply_upgrade,
+            publish_bootnodes,
         } => {
-            let resolved_config =
-                resolve_spawn_config(config, base_path, with_monitor, apply_upgrade)?;
+            let resolved_config = resolve_spawn_config(
+                config,
+                base_path,
+                with_monitor,
+                apply_upgrade,
+                publish_bootnodes,
+            )?;
             let step: Step = step.into();
             let base_path_str = resolved_config.base_path.to_string_lossy();
 
@@ -260,6 +278,8 @@ async fn main() -> Result<(), anyhow::Error> {
 
             resolve_if_dir_exist(&resolved_config.base_path, step).await;
 
+            manifest::warn_on_binary_mismatch(resolved_config.base_path.as_path()).await;
+
             let network =
                 doppelganger::spawn(step, resolved_config.base_path.as_path(), None, None)
                     .await
@@ -268,6 +288,15 @@ async fn main() -> Result<(), anyhow::Error> {
             ensure_startup_producing_blocks(&network).await;
 
             verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
+
+            if resolved_config.publish_bootnodes {
+                doppelganger::publish_bootnodes(
+                    &network,
+                    resolved_config.base_path.as_path(),
+                    step,
+                )
+                .await?;
+            }
 
             if resolved_config.apply_upgrade {
                 upgrade::apply_from_ready(&network, resolved_config.base_path.as_path()).await?;
