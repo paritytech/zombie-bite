@@ -184,7 +184,22 @@ impl Upgrades {
     }
 }
 
-pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain) -> u32 {
+/// Per-parachain core counts from configuration, keyed by para id. Overrides
+/// the built-in defaults below, which mirror the live networks.
+pub type CoresOverride = std::collections::HashMap<u32, u32>;
+
+/// Everything a bite needs beyond the chains themselves.
+#[derive(Debug, Default, Clone)]
+pub struct BiteOptions {
+    pub upgrades: Upgrades,
+    pub cores: CoresOverride,
+    pub keep_messaging_state: bool,
+}
+
+pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain, override_: &CoresOverride) -> u32 {
+    if let Some(cores) = override_.get(&para.id()) {
+        return *cores;
+    }
     match para {
         Parachain::AssetHub { .. } => 3,
         Parachain::People { .. } => match relay {
@@ -680,6 +695,11 @@ pub struct ZombieBiteConfig {
     pub and_spawn: Option<bool>,
     pub with_monitor: Option<bool>,
     pub apply_upgrade: Option<bool>,
+    /// Keep inherited HRMP/DMP state instead of clearing it. Correct when the
+    /// relay and parachain snapshots agree on channel heads (a relay whose only
+    /// parachains are the ones being bitten); wrong for a shared relay, where
+    /// the mismatch makes cumulus panic with `HRMP head mismatch`.
+    pub keep_messaging_state: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1174,6 +1194,7 @@ mod test {
             and_spawn: None,
             with_monitor: None,
             apply_upgrade: None,
+            keep_messaging_state: None,
         };
 
         assert_eq!(config.get_parachains().len(), 0);
@@ -1228,6 +1249,7 @@ mod test {
             and_spawn: None,
             with_monitor: None,
             apply_upgrade: None,
+            keep_messaging_state: None,
         };
 
         let parachains = config.get_parachains();

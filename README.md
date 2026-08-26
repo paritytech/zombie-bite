@@ -103,6 +103,15 @@ zombie-bite bite -r kusama --rc-upgrade ./kusama_runtime.wasm --and-spawn --appl
 zombie-bite spawn -d /tmp/base_path --apply-upgrade
 ```
 
+#### Cores and messaging state
+
+- `--para-cores <para_id>=<cores>` overrides how many cores a parachain gets (defaults mirror the live networks, e.g. asset-hub takes 3 for elastic scaling). The relay's validator count follows the total.
+- `--keep-messaging-state` keeps the inherited HRMP/DMP state instead of clearing it. Only correct when the relay's parachains are exactly the ones being bitten, so both snapshots agree on channel heads; on a shared relay the mismatch makes cumulus panic with `HRMP head mismatch`.
+
+#### Overrides are checked against the runtime
+
+Storage keys are derived from pallet and item names, items the runtime does not have are skipped, and a value that does not survive a decode/encode round-trip against its real on-chain type fails the bite instead of silently landing as something else. `HostConfiguration` is patched from the live value (only `num_cores` changes) rather than replaced, so executor params and async-backing settings of the bitten chain are preserved. A parachain needs an `rpc_endpoint` for its overrides to be verified this way.
+
 #### Spawn
 
 Spawn a new instance of the _bited_ network with the following cmd:

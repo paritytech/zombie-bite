@@ -13,6 +13,7 @@ use zombienet_sdk::{LocalFileSystem, Network, NetworkNode};
 mod cli;
 mod config;
 mod doppelganger;
+mod metadata;
 mod monit;
 mod overrides;
 mod sync;
@@ -165,6 +166,8 @@ async fn main() -> Result<(), anyhow::Error> {
             relay_upgrade,
             para_upgrade,
             apply_upgrade,
+            keep_messaging_state,
+            para_cores,
         } => {
             if with_monitor && !and_spawn {
                 bail!("--with-monitor can only be used with --and-spawn");
@@ -182,12 +185,14 @@ async fn main() -> Result<(), anyhow::Error> {
                 relay_upgrade,
                 para_upgrade,
                 apply_upgrade,
+                keep_messaging_state,
+                para_cores,
             )?;
 
             if resolved_config.apply_upgrade && !resolved_config.and_spawn {
                 bail!("--apply-upgrade can only be used with --and-spawn");
             }
-            if resolved_config.apply_upgrade && resolved_config.upgrades.is_empty() {
+            if resolved_config.apply_upgrade && resolved_config.opts.upgrades.is_empty() {
                 bail!("--apply-upgrade needs an upgrade to carry (--rc-upgrade / --para-upgrade)");
             }
 
@@ -197,7 +202,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 resolved_config.relaychain,
                 resolved_config.parachains,
                 &database,
-                &resolved_config.upgrades,
+                &resolved_config.opts,
             )
             .await
             .expect("bite should work");
