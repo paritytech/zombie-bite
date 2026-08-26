@@ -158,6 +158,32 @@ type MaybeChainSpec = Option<String>;
 // bridge (1002): 1
 // collectives (1001): 1
 
+/// Dev validators for a bitten relay: one per requested core plus one spare,
+/// clamped between the two nodes the spawner always starts (alice, bob) and
+/// the seven well-known dev accounts. Used by both the state overrides and the
+/// spawner so the validator set in state always matches the nodes running.
+// TODO: the upper bound is only there because we reuse the well-known dev
+// accounts; generating keys would let a fork scale past 7 validators.
+pub fn num_validators_for_cores(req_cores: u32) -> u32 {
+    (1 + req_cores).clamp(2, 7)
+}
+
+/// Runtimes under test, carried into the fork as an *authorized* upgrade
+/// (`System::AuthorizedUpgrade` seeded at bite time) instead of installed,
+/// so the upgrade can be enacted through the production path via the
+/// permissionless `apply_authorized_upgrade`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct Upgrades {
+    pub relay: Option<String>,
+    pub paras: std::collections::HashMap<u32, String>,
+}
+
+impl Upgrades {
+    pub fn is_empty(&self) -> bool {
+        self.relay.is_none() && self.paras.is_empty()
+    }
+}
+
 pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain) -> u32 {
     match para {
         Parachain::AssetHub { .. } => 3,
@@ -653,6 +679,7 @@ pub struct ZombieBiteConfig {
     pub base_path: Option<String>,
     pub and_spawn: Option<bool>,
     pub with_monitor: Option<bool>,
+    pub apply_upgrade: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -661,6 +688,7 @@ pub struct RelaychainConfig {
     pub runtime_override: Option<String>,
     pub sync_url: Option<String>,
     pub bite_at: Option<u32>,
+    pub upgrade: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -668,6 +696,7 @@ pub struct ParachainConfig {
     #[serde(rename = "type")]
     pub parachain_type: String, // asset-hub, coretime, people, bridge-hub, collectives, custom
     pub runtime_override: Option<String>,
+    pub upgrade: Option<String>,
     pub enabled: Option<bool>, // default true
     pub bite_at: Option<u32>,
     pub rpc_endpoint: Option<String>,
@@ -799,6 +828,7 @@ mod test {
         let config = ParachainConfig {
             parachain_type: "asset-hub".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: None, // Not specified
             bite_at: None,
             rpc_endpoint: None,
@@ -819,6 +849,7 @@ mod test {
         let config = ParachainConfig {
             parachain_type: "coretime".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: None,
@@ -839,6 +870,7 @@ mod test {
         let config = ParachainConfig {
             parachain_type: "people".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: Some(false),
             bite_at: None,
             rpc_endpoint: None,
@@ -856,6 +888,7 @@ mod test {
         let config = ParachainConfig {
             parachain_type: "bridge-hub".to_string(),
             runtime_override: Some(override_path.clone()),
+            upgrade: None,
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: None,
@@ -879,6 +912,7 @@ mod test {
         let config = ParachainConfig {
             parachain_type: "invalid-chain".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: None,
@@ -898,6 +932,7 @@ mod test {
             let config = ParachainConfig {
                 parachain_type: parachain_type.to_string(),
                 runtime_override: None,
+                upgrade: None,
                 enabled: Some(true),
                 bite_at: None,
                 rpc_endpoint: None,
@@ -1130,6 +1165,7 @@ mod test {
             relaychain: RelaychainConfig {
                 network: "polkadot".to_string(),
                 runtime_override: None,
+                upgrade: None,
                 sync_url: None,
                 bite_at: None,
             },
@@ -1137,6 +1173,7 @@ mod test {
             base_path: None,
             and_spawn: None,
             with_monitor: None,
+            apply_upgrade: None,
         };
 
         assert_eq!(config.get_parachains().len(), 0);
@@ -1148,6 +1185,7 @@ mod test {
             relaychain: RelaychainConfig {
                 network: "kusama".to_string(),
                 runtime_override: None,
+                upgrade: None,
                 sync_url: None,
                 bite_at: None,
             },
@@ -1155,6 +1193,7 @@ mod test {
                 ParachainConfig {
                     parachain_type: "asset-hub".to_string(),
                     runtime_override: None,
+                    upgrade: None,
                     enabled: Some(true),
                     bite_at: None,
                     rpc_endpoint: None,
@@ -1165,6 +1204,7 @@ mod test {
                 ParachainConfig {
                     parachain_type: "coretime".to_string(),
                     runtime_override: None,
+                    upgrade: None,
                     enabled: Some(false), // Disabled
                     bite_at: None,
                     rpc_endpoint: None,
@@ -1175,6 +1215,7 @@ mod test {
                 ParachainConfig {
                     parachain_type: "people".to_string(),
                     runtime_override: None,
+                    upgrade: None,
                     enabled: None, // Defaults to true
                     bite_at: None,
                     rpc_endpoint: None,
@@ -1186,6 +1227,7 @@ mod test {
             base_path: None,
             and_spawn: None,
             with_monitor: None,
+            apply_upgrade: None,
         };
 
         let parachains = config.get_parachains();
@@ -1375,6 +1417,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
         let config = ParachainConfig {
             parachain_type: "custom".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: Some("wss://example.com".to_string()),
@@ -1395,6 +1438,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
         let config = ParachainConfig {
             parachain_type: "custom".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: Some("wss://example.com".to_string()),
@@ -1413,6 +1457,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
         let config = ParachainConfig {
             parachain_type: "custom".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: Some("wss://example.com".to_string()),
@@ -1431,6 +1476,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
         let config = ParachainConfig {
             parachain_type: "custom".to_string(),
             runtime_override: None,
+            upgrade: None,
             enabled: Some(true),
             bite_at: None,
             rpc_endpoint: None,

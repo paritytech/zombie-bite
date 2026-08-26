@@ -1,7 +1,7 @@
 #![allow(dead_code)]
 // TODO: don't allow dead_code
 
-use anyhow::anyhow;
+use anyhow::{anyhow, bail};
 use futures::future::try_join_all;
 use futures::FutureExt;
 use serde_json::json;
@@ -22,6 +22,7 @@ use tar::Builder;
 
 use tracing::debug;
 use tracing::{info, trace};
+use zombienet_configuration::shared::types::AssetLocation;
 use zombienet_configuration::NetworkConfigBuilder;
 use zombienet_orchestrator::network::Network;
 use zombienet_orchestrator::Orchestrator;
@@ -37,7 +38,7 @@ use crate::utils::{
 };
 
 use crate::config::{
-    get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, Step,
+    get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, Step, Upgrades,
 };
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
@@ -45,7 +46,7 @@ use crate::sync::{sync_para, sync_relay_only};
 use std::env;
 
 const PORTS_FILE: &str = "ports.json";
-const READY_FILE: &str = "ready.json";
+pub const READY_FILE: &str = "ready.json";
 const VALIDATOR_ENV: (&str, &str) = ("ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION", "1");
 
 #[derive(Debug, Clone)]
@@ -63,6 +64,7 @@ pub async fn doppelganger_inner(
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,
     database: &str,
+    upgrades: &Upgrades,
 ) -> Result<(), anyhow::Error> {
     // Star the node and wait until finish (with temp dir managed by us)
     info!(
@@ -91,8 +93,13 @@ pub async fn doppelganger_inner(
     // Parachain sync
     let mut syncs = vec![];
     for para in &paras_to {
-        let para_default_overrides_path =
-            generate_default_overrides_for_para(&base_dir_str, para, &relay_chain).await;
+        let para_default_overrides_path = generate_default_overrides_for_para(
+            &base_dir_str,
+            para,
+            &relay_chain,
+            upgrades.paras.get(&para.id()).map(String::as_str),
+        )
+        .await;
         let info_path = format!("{base_dir_str}/para-{}.txt", para.id());
 
         let maybe_target_header_path = if let Some(at_block) = para.at_block() {
@@ -217,8 +224,14 @@ pub async fn doppelganger_inner(
     let req_cores: u32 = paras_to.iter().fold(0u32, |acc, para| {
         acc + get_assigned_cores(&relay_chain, para)
     });
-    let rc_default_overrides_path =
-        generate_default_overrides_for_rc(&base_dir_str, &relay_chain, &paras_to, req_cores).await;
+    let rc_default_overrides_path = generate_default_overrides_for_rc(
+        &base_dir_str,
+        &relay_chain,
+        &paras_to,
+        req_cores,
+        upgrades.relay.as_deref(),
+    )
+    .await;
     let rc_info_path = format!("{base_dir_str}/rc_info.txt");
     // RELAYCHAIN sync
 
@@ -335,13 +348,43 @@ pub async fn doppelganger_inner(
     }
 
     // ready to start
+    // The source rpc endpoints let the spawn step verify the fork actually
+    // diverged from the network it was bitten from.
     let mut ready_content = json!({
         "rc_start_block": rc_start_block,
+        "rc_source_rpc": relay_chain.rpc_endpoint(),
     });
 
     // Add all parachain start blocks
     for (key, value) in para_start_blocks {
         ready_content[key] = value;
+    }
+    for para in &paras_to {
+        if let Some(source_rpc) = para.rpc_endpoint() {
+            ready_content[format!("para_{}_source_rpc", para.id())] = json!(source_rpc);
+        }
+    }
+
+    // Carried upgrade blobs live next to ready.json (outside the step dirs, so
+    // they survive clean-up) and must match the seeded System::AuthorizedUpgrade.
+    let global_base_dir_str = global_base_dir.to_string_lossy();
+    if let Some(upgrade_wasm) = &upgrades.relay {
+        let blob_name = format!("{}-upgrade.wasm", relay_chain.as_chain_string());
+        let (blob, hash) = copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
+        ready_content["rc_upgrade_wasm"] = json!(blob);
+        ready_content["rc_upgrade_hash"] = json!(hash);
+    }
+    for para in &paras_to {
+        if let Some(upgrade_wasm) = upgrades.paras.get(&para.id()) {
+            let blob_name = format!(
+                "{}-upgrade.wasm",
+                para.as_chain_string(&relay_chain.as_chain_string())
+            );
+            let (blob, hash) =
+                copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
+            ready_content[format!("para_{}_upgrade_wasm", para.id())] = json!(blob);
+            ready_content[format!("para_{}_upgrade_hash", para.id())] = json!(hash);
+        }
     }
 
     let alice_config = config
@@ -383,6 +426,17 @@ pub async fn doppelganger_inner(
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
+}
+
+async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
+    let wasm = fs::read(from)
+        .await
+        .unwrap_or_else(|_| panic!("Error reading upgrade wasm from path {from}"));
+    fs::write(format!("{base_dir}/{blob_name}"), &wasm)
+        .await
+        .expect("write upgrade blob should works");
+    let hash = format!("0x{}", hex::encode(subhasher::blake2_256(&wasm[..])));
+    (blob_name.to_string(), hash)
 }
 
 /// Create the needed artifats for the next step
@@ -630,9 +684,8 @@ async fn generate_config(
         get_random_port().await
     };
 
-    // Alice + Bob + number of parachains
-    // let num_validators = (2 + paras.len()).min(7);
-    let num_validators = (2 + req_cores).min(7) as usize;
+    // Must match the validator set installed by the state overrides.
+    let num_validators = crate::config::num_validators_for_cores(req_cores) as usize;
 
     // config a new network with dynamic validators
     let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {
@@ -827,10 +880,53 @@ pub async fn spawn(
     )
     .unwrap();
 
+    validate_parachain_specs(&network_config).await?;
+
     orchestrator
         .spawn(network_config)
         .await
         .map_err(|e| anyhow!(e.to_string()))
+}
+
+/// Two parachains resolving to the same chain-spec identity share one spec
+/// (last one wins) and every collator silently runs the same chain. The
+/// identity is `chain` when set, else the `id` of the supplied chain-spec,
+/// which is what zombienet uses when no `chain` is given.
+async fn validate_parachain_specs(
+    network_config: &zombienet_configuration::NetworkConfig,
+) -> Result<(), anyhow::Error> {
+    let mut seen: Vec<(String, u32)> = vec![];
+    for para in network_config.parachains() {
+        let identity = if let Some(chain) = para.chain() {
+            chain.as_str().to_string()
+        } else if let Some(AssetLocation::FilePath(path)) = para.chain_spec_path() {
+            let spec = fs::read_to_string(path)
+                .await
+                .map_err(|e| anyhow!("parachain {}: can't read chain-spec: {e}", para.id()))?;
+            let spec: serde_json::Value = serde_json::from_str(&spec)
+                .map_err(|e| anyhow!("parachain {}: invalid chain-spec json: {e}", para.id()))?;
+            spec["id"]
+                .as_str()
+                .ok_or_else(|| {
+                    anyhow!(
+                        "parachain {} has neither 'chain' nor an 'id' in its chain-spec",
+                        para.id()
+                    )
+                })?
+                .to_string()
+        } else {
+            continue;
+        };
+
+        if let Some((_, other)) = seen.iter().find(|(seen, _)| *seen == identity) {
+            bail!(
+                "parachains {other} and {} both resolve to chain '{identity}', so they would share one chain spec",
+                para.id()
+            );
+        }
+        seen.push((identity, para.id()));
+    }
+    Ok(())
 }
 
 async fn generate_snap(data_path: &str, snap_path: &str) -> Result<(), anyhow::Error> {
@@ -972,6 +1068,75 @@ mod test {
         loop {
             tokio::time::sleep(std::time::Duration::from_secs(5)).await;
         }
+    }
+
+    fn config_with_paras(
+        paras: Vec<(u32, Option<&str>, Option<&str>)>, // (id, chain, chain_spec_path)
+    ) -> NetworkConfig {
+        let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {
+            r.with_chain("polkadot")
+                .with_default_command("polkadot")
+                .with_validator(|node| node.with_name("alice"))
+                .with_validator(|node| node.with_name("bob"))
+        });
+
+        for (id, chain, spec_path) in paras {
+            config = config.with_parachain(|p| {
+                let mut p = p.with_id(id).with_default_command("polkadot-parachain");
+                if let Some(chain) = chain {
+                    p = p.with_chain(chain);
+                }
+                if let Some(spec_path) = spec_path {
+                    p = p.with_chain_spec_path(spec_path);
+                }
+                p.with_collator(|c| c.with_name(format!("col-{id}").as_str()))
+            });
+        }
+
+        config.build().unwrap()
+    }
+
+    async fn write_spec(path: &str, id: &str) {
+        fs::write(path, format!(r#"{{"id":"{id}"}}"#))
+            .await
+            .unwrap();
+    }
+
+    #[tokio::test]
+    async fn validate_rejects_duplicated_chain_names() {
+        let config = config_with_paras(vec![
+            (1000, Some("asset-hub"), Some("/tmp/a.json")),
+            (1005, Some("asset-hub"), Some("/tmp/b.json")),
+        ]);
+        let err = validate_parachain_specs(&config).await.unwrap_err();
+        assert!(
+            err.to_string().contains("share one chain spec"),
+            "got: {err}"
+        );
+    }
+
+    #[tokio::test]
+    async fn validate_accepts_unique_chains() {
+        let config = config_with_paras(vec![
+            (1000, Some("asset-hub"), Some("/tmp/a.json")),
+            (1005, Some("coretime"), Some("/tmp/b.json")),
+        ]);
+        assert!(validate_parachain_specs(&config).await.is_ok());
+    }
+
+    #[tokio::test]
+    async fn validate_uses_spec_id_when_chain_is_absent() {
+        let (dup_a, dup_b) = ("/tmp/zb-dup-a.json", "/tmp/zb-dup-b.json");
+        write_spec(dup_a, "asset-hub-kusama").await;
+        write_spec(dup_b, "asset-hub-kusama").await;
+
+        let config = config_with_paras(vec![(1000, None, Some(dup_a)), (1005, None, Some(dup_b))]);
+        let err = validate_parachain_specs(&config).await.unwrap_err();
+        assert!(err.to_string().contains("asset-hub-kusama"), "got: {err}");
+
+        write_spec(dup_b, "coretime-kusama").await;
+        let config = config_with_paras(vec![(1000, None, Some(dup_a)), (1005, None, Some(dup_b))]);
+        assert!(validate_parachain_specs(&config).await.is_ok());
     }
 
     #[tokio::test]

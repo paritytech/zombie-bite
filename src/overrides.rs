@@ -13,6 +13,26 @@ use crate::{
 
 use zombienet_sdk::generators::core_assignment;
 
+/// Seed `System::AuthorizedUpgrade` with the blob's hash, the state a passed
+/// `authorize_upgrade(hash)` referendum leaves behind. The permissionless
+/// `apply_authorized_upgrade(blob)` can then enact the upgrade through the
+/// production path, which needs no sudo (usable on Kusama/Polkadot forks).
+async fn inject_authorized_upgrade(injects: &mut Value, upgrade_wasm: &str) {
+    let wasm_content = fs::read(upgrade_wasm)
+        .await
+        .unwrap_or_else(|_| panic!("Error reading upgrade wasm from path {}", upgrade_wasm));
+    let auth_key = array_bytes::bytes2hex(
+        "",
+        substorager::storage_value_key(&b"System"[..], b"AuthorizedUpgrade"),
+    );
+    // CodeUpgradeAuthorization { code_hash, check_version: true }
+    let value = format!(
+        "{}01",
+        hex::encode(subhasher::blake2_256(&wasm_content[..]))
+    );
+    injects[auth_key] = Value::String(value);
+}
+
 /// Generate the injects for Session.NextKeys storage overrides for validators
 fn generate_next_keys_injects(
     validator_keys: &[&crate::utils::ValidatorKeys],
@@ -93,11 +113,10 @@ pub fn generate_rc_overrides(validator_keys: &[&crate::utils::ValidatorKeys]) ->
         .collect::<Vec<_>>()
         .join("");
 
-    let validator_groups_count_hex = format!("{:02x}", num_validators * 4); // Each group entry is 4 bytes
-    let validator_groups: String = (0..num_validators)
-        .map(|i| format!("{:02x}000000", i))
-        .collect::<Vec<_>>()
-        .join("");
+    // ValidatorGroups is Vec<Vec<ValidatorIndex>>, so each single-validator group
+    // carries its own compact length prefix.
+    let validator_groups: Vec<Vec<u32>> = (0..num_validators as u32).map(|i| vec![i]).collect();
+    let validator_groups = array_bytes::bytes2hex("", validator_groups.encode());
 
     // Build para validator keys (same as authority discovery for our purposes)
     let para_validator_keys: String = validator_keys
@@ -126,9 +145,7 @@ pub fn generate_rc_overrides(validator_keys: &[&crate::utils::ValidatorKeys]) ->
         // Staking Invulnerables (dynamic list)
         "5f3e4907f716ac89b6347d15ececedca5579297f4dfb9609e7e4c2ebab9ce40a": format!("{}{}", validator_count_hex, stash_list),
         // paraScheduler validatorGroup (dynamic groups based on validator count)
-        "94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db": format!("{}{}", validator_groups_count_hex, validator_groups),
-        // paraScheduler claimQueue (empty, will auto-fill)
-        "94eadf0156a8ad5156507773d0471e4a49f6c9aa90c04982c05388649310f22f": "040000000000",
+        "94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db": validator_groups,
         // paraShared activeValidatorIndices (dynamic)
         "b341e3a63e58a188839b242d17f8c9f82586833f834350b4d435d5fd269ecc8b": format!("{}{}", validator_count_hex, validator_indices),
         // paraShared activeValidatorKeys (dynamic)
@@ -137,8 +154,6 @@ pub fn generate_rc_overrides(validator_keys: &[&crate::utils::ValidatorKeys]) ->
         "2099d7f109d6e535fb000bba623fd4409f99a2ce711f3a31b2fc05604c93f179": format!("{}{}", validator_count_hex, authority_discovery_keys),
         // authorityDiscovery nextKeys (dynamic)
         "2099d7f109d6e535fb000bba623fd4404c014e6bf8b8c2c011e7290b85696bb3": format!("{}{}", validator_count_hex, authority_discovery_keys),
-        // paraScheduler availabilityCores (1 core, free)
-        "94eadf0156a8ad5156507773d0471e4ab8ebad86f546c7e0b135a4212aace339": "0400",
         // Sudo Key (Alice)
         "5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b": "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
     });
@@ -205,9 +220,9 @@ pub async fn generate_default_overrides_for_rc(
     relay: &Relaychain,
     paras: &Vec<Parachain>,
     req_cores: u32,
+    maybe_upgrade: Option<&str>,
 ) -> PathBuf {
-    // The number of required validators, is equal the number of requested cores by paras + 1
-    let num_validators = (1 + req_cores).min(7);
+    let num_validators = crate::config::num_validators_for_cores(req_cores);
     let validator_keys = get_validator_keys(num_validators as usize);
 
     let next_keys_injects = generate_next_keys_injects(&validator_keys);
@@ -292,6 +307,10 @@ pub async fn generate_default_overrides_for_rc(
         }
     }
 
+    if let Some(upgrade_wasm) = maybe_upgrade {
+        inject_authorized_upgrade(&mut injects, upgrade_wasm).await;
+    }
+
     let full_content = json!({
         "overrides": overrides,
         "injects": injects
@@ -309,6 +328,7 @@ pub async fn generate_default_overrides_for_para(
     base_dir: &str,
     para: &Parachain,
     relay: &Relaychain,
+    maybe_upgrade: Option<&str>,
 ) -> PathBuf {
     // For AH determine key type based on relay chain: ed25519 for Polkadot, sr25519 for others
     let key_type = match (relay, para) {
@@ -321,7 +341,11 @@ pub async fn generate_default_overrides_for_para(
     let key_to_use = generate_collator_key_from_seed(&seed, key_type);
 
     // Generate the injects using the helper function
-    let injects = generate_collator_next_keys_injects(&key_to_use);
+    let mut injects = generate_collator_next_keys_injects(&key_to_use);
+
+    if let Some(upgrade_wasm) = maybe_upgrade {
+        inject_authorized_upgrade(&mut injects, upgrade_wasm).await;
+    }
 
     // <Pallet> <Item>
     // e.g Validator Validators
@@ -419,6 +443,7 @@ mod test {
             &crate::config::Relaychain::new("polakdot"),
             &paras,
             2,
+            None,
         )
         .await;
     }
@@ -506,6 +531,17 @@ mod test {
             "08be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25ffe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e"
         );
 
+        // ParaScheduler ValidatorGroups: Vec<Vec<ValidatorIndex>>, two groups of one
+        let expected_groups: Vec<Vec<u32>> = vec![vec![0], vec![1]];
+        assert_eq!(
+            overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
+            array_bytes::bytes2hex("", expected_groups.encode())
+        );
+        assert_eq!(
+            overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
+            "0804000000000401000000"
+        );
+
         // Para Id Parachains
         assert_eq!(
             overrides["cd710b30bd2eab0352ddcc26417aa1940b76934f4cc08dee01012d059e1b83ee"],
@@ -523,6 +559,23 @@ mod test {
             overrides["5c0d1176a568c1f92944340dbfed9e9c530ebca703c85910e7164cb7d1c9e47b"],
             "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
         );
+    }
+
+    #[tokio::test]
+    async fn inject_authorized_upgrade_seeds_hash_and_check_version() {
+        let wasm_path = "/tmp/zombie-bite-test-upgrade.wasm";
+        let wasm = b"not-a-real-runtime";
+        tokio::fs::write(wasm_path, wasm).await.unwrap();
+
+        let mut injects = json!({});
+        inject_authorized_upgrade(&mut injects, wasm_path).await;
+
+        let key = array_bytes::bytes2hex(
+            "",
+            substorager::storage_value_key(&b"System"[..], b"AuthorizedUpgrade"),
+        );
+        let expected = format!("{}01", hex::encode(subhasher::blake2_256(&wasm[..])));
+        assert_eq!(injects[key], json!(expected));
     }
 
     #[test]

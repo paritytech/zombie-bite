@@ -7,7 +7,7 @@ use std::{
 };
 use tracing::{trace, warn};
 
-use crate::config::{Parachain, Relaychain, ZombieBiteConfig};
+use crate::config::{Parachain, Relaychain, Upgrades, ZombieBiteConfig};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -32,6 +32,21 @@ pub enum Commands {
         /// The resulting network will be running with this runtime.
         #[arg(long = "rc-override", verbatim_doc_comment)]
         relay_runtime: Option<String>,
+        /// Runtime to carry as an *authorized* upgrade for the relay chain.
+        /// Unlike --rc-override it is NOT installed: the fork spawns on the live
+        /// runtime with System::AuthorizedUpgrade seeded, so the upgrade can be
+        /// enacted through the production path (apply_authorized_upgrade is
+        /// permissionless), either manually or with --apply-upgrade.
+        #[arg(long = "rc-upgrade", verbatim_doc_comment)]
+        relay_upgrade: Option<String>,
+        /// Same as --rc-upgrade but for a parachain, format: <para_id>=<wasm_path>
+        /// Can be set multiple times, once per para to upgrade.
+        #[arg(long = "para-upgrade", verbatim_doc_comment)]
+        para_upgrade: Vec<String>,
+        /// After spawn (requires --and-spawn), submit apply_authorized_upgrade
+        /// for every carried upgrade and wait until it enacts.
+        #[arg(long, default_value_t = false, verbatim_doc_comment)]
+        apply_upgrade: bool,
         /// If provided we will _bite_ the live network at the supplied block hieght
         #[arg(long = "rc-bite-at", verbatim_doc_comment)]
         relay_bite_at: Option<u32>,
@@ -72,6 +87,10 @@ pub enum Commands {
         /// The network will be using for bite (will try the network + ah)
         #[arg(short = 's', value_parser = clap::builder::PossibleValuesParser::new(["spawn", "post", "after"]), default_value="spawn")]
         step: String,
+        /// Submit apply_authorized_upgrade for every upgrade carried by the bite
+        /// and wait until it enacts.
+        #[arg(long, default_value_t = false, verbatim_doc_comment)]
+        apply_upgrade: bool,
     },
     /// [Helper] Generate artifacts to be used by the next step (only 'spawn' and 'post' allowed)
     GenerateArtifacts {
@@ -135,12 +154,15 @@ pub struct ResolvedBiteConfig {
     pub parachains: Vec<Parachain>,
     pub base_path: PathBuf,
     pub and_spawn: bool,
+    pub upgrades: Upgrades,
+    pub apply_upgrade: bool,
 }
 
 #[derive(Debug)]
 pub struct ResolvedSpawnConfig {
     pub base_path: PathBuf,
     pub with_monitor: bool,
+    pub apply_upgrade: bool,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -153,6 +175,9 @@ pub fn resolve_bite_config(
     base_path: Option<String>,
     rc_sync_url: Option<String>,
     and_spawn: bool,
+    relay_upgrade: Option<String>,
+    para_upgrade: Vec<String>,
+    apply_upgrade: bool,
 ) -> Result<ResolvedBiteConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -255,11 +280,48 @@ pub fn resolve_bite_config(
         and_spawn
     };
 
+    // Resolve upgrades (CLI overrides config file)
+    let mut upgrades = Upgrades {
+        relay: relay_upgrade,
+        paras: para_upgrade
+            .iter()
+            .map(|entry| {
+                let (id, path) = entry.split_once('=').unwrap_or_else(|| {
+                    panic!("--para-upgrade format must be <para_id>=<wasm_path>, got: {entry}")
+                });
+                let id: u32 = id
+                    .parse()
+                    .unwrap_or_else(|_| panic!("Invalid para_id '{id}' in --para-upgrade"));
+                (id, path.to_string())
+            })
+            .collect(),
+    };
+    if let Some(ref config) = config_file {
+        if upgrades.relay.is_none() {
+            upgrades.relay = config.relaychain.upgrade.clone();
+        }
+        for para_cfg in config.parachains.as_deref().unwrap_or_default() {
+            if let (Some(upgrade), Some(para)) = (&para_cfg.upgrade, para_cfg.to_parachain()) {
+                upgrades.paras.entry(para.id()).or_insert(upgrade.clone());
+            }
+        }
+    }
+
+    let resolved_apply_upgrade = if apply_upgrade {
+        true
+    } else if let Some(ref config) = config_file {
+        config.apply_upgrade.unwrap_or(false)
+    } else {
+        false
+    };
+
     Ok(ResolvedBiteConfig {
         relaychain,
         parachains: resolved_parachains,
         base_path: resolved_base_path,
         and_spawn: resolved_and_spawn,
+        upgrades,
+        apply_upgrade: resolved_apply_upgrade,
     })
 }
 
@@ -267,6 +329,7 @@ pub fn resolve_spawn_config(
     config_path: Option<String>,
     base_path: Option<String>,
     with_monitor: bool,
+    apply_upgrade: bool,
 ) -> Result<ResolvedSpawnConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -291,9 +354,18 @@ pub fn resolve_spawn_config(
         with_monitor
     };
 
+    let resolved_apply_upgrade = if apply_upgrade {
+        true
+    } else if let Some(ref config) = config_file {
+        config.apply_upgrade.unwrap_or(false)
+    } else {
+        false
+    };
+
     Ok(ResolvedSpawnConfig {
         base_path: resolved_base_path,
         with_monitor: resolved_with_monitor,
+        apply_upgrade: resolved_apply_upgrade,
     })
 }
 
