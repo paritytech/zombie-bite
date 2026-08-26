@@ -1,3 +1,4 @@
+use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
 use std::{
     env,
@@ -294,20 +295,19 @@ pub fn resolve_bite_config(
     };
 
     // Resolve upgrades (CLI overrides config file)
+    let mut para_upgrades = std::collections::HashMap::new();
+    for entry in &para_upgrade {
+        let (id, path) = entry.split_once('=').ok_or_else(|| {
+            anyhow!("--para-upgrade must be <para_id>=<wasm_path>, got '{entry}'")
+        })?;
+        let id: u32 = id
+            .parse()
+            .map_err(|_| anyhow!("invalid para_id '{id}' in --para-upgrade"))?;
+        para_upgrades.insert(id, path.to_string());
+    }
     let mut upgrades = Upgrades {
         relay: relay_upgrade,
-        paras: para_upgrade
-            .iter()
-            .map(|entry| {
-                let (id, path) = entry.split_once('=').unwrap_or_else(|| {
-                    panic!("--para-upgrade format must be <para_id>=<wasm_path>, got: {entry}")
-                });
-                let id: u32 = id
-                    .parse()
-                    .unwrap_or_else(|_| panic!("Invalid para_id '{id}' in --para-upgrade"));
-                (id, path.to_string())
-            })
-            .collect(),
+        paras: para_upgrades,
     };
     if let Some(ref config) = config_file {
         if upgrades.relay.is_none() {
@@ -338,16 +338,26 @@ pub fn resolve_bite_config(
         }
     }
     for entry in &para_cores {
-        let (id, c) = entry.split_once('=').unwrap_or_else(|| {
-            panic!("--para-cores format must be <para_id>=<cores>, got: {entry}")
-        });
+        let (id, c) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--para-cores must be <para_id>=<cores>, got '{entry}'"))?;
         let id: u32 = id
             .parse()
-            .unwrap_or_else(|_| panic!("Invalid para_id '{id}' in --para-cores"));
+            .map_err(|_| anyhow!("invalid para_id '{id}' in --para-cores"))?;
         let c: u32 = c
             .parse()
-            .unwrap_or_else(|_| panic!("Invalid cores '{c}' in --para-cores"));
+            .map_err(|_| anyhow!("invalid cores '{c}' in --para-cores"))?;
+        if c == 0 {
+            bail!("--para-cores {id}=0: a parachain with no cores can't have blocks backed");
+        }
         cores.insert(id, c);
+    }
+    // A core count for a para that is not part of the bite is a typo, not a
+    // silently ignorable no-op.
+    for id in cores.keys() {
+        if !resolved_parachains.iter().any(|para| para.id() == *id) {
+            bail!("--para-cores/config sets cores for para {id}, which is not part of this bite");
+        }
     }
 
     let resolved_keep_messaging = if keep_messaging_state {

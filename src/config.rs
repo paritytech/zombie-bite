@@ -535,6 +535,28 @@ impl Parachain {
         }
     }
 
+    /// Endpoint used to read the parachain's metadata when none is configured,
+    /// so overrides are checked against the runtime by default. A wrong or
+    /// unreachable guess only costs the verification (with a warning), never the
+    /// bite itself.
+    // TODO: same as the relay endpoints, these should be configurable.
+    pub fn default_rpc_endpoint(&self, relay: &Relaychain) -> Option<String> {
+        let prefix = match self {
+            Parachain::AssetHub { .. } => "asset-hub",
+            Parachain::Coretime { .. } => "coretime",
+            Parachain::People { .. } => "people",
+            Parachain::BridgeHub { .. } => "bridge-hub",
+            Parachain::Collectives { .. } => "collectives",
+            // A custom para is only reachable through the endpoint its config
+            // supplies.
+            Parachain::Custom { .. } => return None,
+        };
+        Some(format!(
+            "wss://{prefix}-{}-rpc.n.dwellir.com",
+            relay.as_chain_string()
+        ))
+    }
+
     pub fn chain_spec_path(&self) -> Option<&str> {
         match self {
             Parachain::Custom { chain_spec, .. } => Some(chain_spec.as_str()),

@@ -94,8 +94,14 @@ pub async fn doppelganger_inner(
     // Parachain sync
     let mut syncs = vec![];
     for para in &paras_to {
-        let para_meta = match para.rpc_endpoint() {
-            Some(url) => ChainMetadata::fetch(&format!("para {}", para.id()), url).await,
+        let para_meta = match para
+            .rpc_endpoint()
+            .map(str::to_string)
+            .or_else(|| para.default_rpc_endpoint(&relay_chain))
+        {
+            Some(url) => {
+                ChainMetadata::fetch(&format!("para {}", para.id()), &url, para.at_block()).await
+            }
             None => {
                 warn!(
                     "para {}: no 'rpc_endpoint' configured, overrides will not be verified against the runtime",
@@ -237,8 +243,12 @@ pub async fn doppelganger_inner(
     let req_cores: u32 = paras_to.iter().fold(0u32, |acc, para| {
         acc + get_assigned_cores(&relay_chain, para, &opts.cores)
     });
-    let rc_meta =
-        ChainMetadata::fetch(&relay_chain.as_chain_string(), &relay_chain.rpc_endpoint()).await;
+    let rc_meta = ChainMetadata::fetch(
+        &relay_chain.as_chain_string(),
+        &relay_chain.rpc_endpoint(),
+        relay_chain.at_block(),
+    )
+    .await;
     let rc_default_overrides_path = generate_default_overrides_for_rc(
         &base_dir_str,
         &relay_chain,

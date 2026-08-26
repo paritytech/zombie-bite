@@ -6,7 +6,7 @@ use tracing::{info, warn};
 
 use crate::{
     config::{get_assigned_cores, CoresOverride, Parachain, Relaychain},
-    metadata::{set_field, storage_key, ChainMetadata},
+    metadata::{nested_mut, set_field, storage_key, ChainMetadata, RuntimeCheck},
     utils::{
         generate_collator_key_from_seed, generate_collator_next_keys_injects, get_validator_keys,
         ParaId, ValidationCode,
@@ -23,7 +23,7 @@ use zombienet_sdk::subxt::ext::scale_value::Value as ScaleValue;
 /// does not survive a decode/encode round-trip against its real on-chain type
 /// fails the bite.
 struct OverrideSet<'a> {
-    meta: Option<&'a ChainMetadata>,
+    meta: Option<&'a dyn RuntimeCheck>,
     overrides: Value,
     injects: Value,
     skipped: Vec<String>,
@@ -31,7 +31,7 @@ struct OverrideSet<'a> {
 }
 
 impl<'a> OverrideSet<'a> {
-    fn new(meta: Option<&'a ChainMetadata>) -> Self {
+    fn new(meta: Option<&'a dyn RuntimeCheck>) -> Self {
         Self {
             meta,
             overrides: json!({}),
@@ -42,10 +42,26 @@ impl<'a> OverrideSet<'a> {
     }
 
     /// `None` when the entry should be dropped (item absent, or value invalid).
-    fn checked_key(&mut self, pallet: &str, item: &str, value: &str) -> Option<String> {
+    ///
+    /// `required` entries are ones the user explicitly asked for (a carried
+    /// upgrade, a wasm override, a sudo key): an item the runtime does not have
+    /// is an error there, not something to quietly drop.
+    fn checked_key(
+        &mut self,
+        pallet: &str,
+        item: &str,
+        value: &str,
+        required: bool,
+    ) -> Option<String> {
         if let Some(meta) = self.meta {
             if !meta.has_item(pallet, item) {
-                self.skipped.push(format!("{pallet}::{item}"));
+                if required {
+                    self.errors.push(format!(
+                        "{pallet}::{item} is not in the runtime, so it can't be set"
+                    ));
+                } else {
+                    self.skipped.push(format!("{pallet}::{item}"));
+                }
                 return None;
             }
             if let Err(e) = meta.verify_value(pallet, item, value) {
@@ -58,7 +74,15 @@ impl<'a> OverrideSet<'a> {
 
     fn set(&mut self, pallet: &str, item: &str, value: impl AsRef<str>) {
         let value = value.as_ref();
-        if let Some(key) = self.checked_key(pallet, item, value) {
+        if let Some(key) = self.checked_key(pallet, item, value, false) {
+            self.overrides[key] = json!(value);
+        }
+    }
+
+    /// Like `set`, for an entry the user asked for explicitly.
+    fn set_required(&mut self, pallet: &str, item: &str, value: impl AsRef<str>) {
+        let value = value.as_ref();
+        if let Some(key) = self.checked_key(pallet, item, value, true) {
             self.overrides[key] = json!(value);
         }
     }
@@ -66,23 +90,78 @@ impl<'a> OverrideSet<'a> {
     /// Map entry; `key_suffix` is the already-hashed map key.
     fn set_map(&mut self, pallet: &str, item: &str, key_suffix: &str, value: impl AsRef<str>) {
         let value = value.as_ref();
-        if let Some(key) = self.checked_key(pallet, item, value) {
+        if let Some(key) = self.checked_key(pallet, item, value, false) {
+            self.overrides[format!("{key}{key_suffix}")] = json!(value);
+        }
+    }
+
+    fn set_map_required(
+        &mut self,
+        pallet: &str,
+        item: &str,
+        key_suffix: &str,
+        value: impl AsRef<str>,
+    ) {
+        let value = value.as_ref();
+        if let Some(key) = self.checked_key(pallet, item, value, true) {
             self.overrides[format!("{key}{key_suffix}")] = json!(value);
         }
     }
 
     fn inject(&mut self, pallet: &str, item: &str, value: impl AsRef<str>) {
         let value = value.as_ref();
-        if let Some(key) = self.checked_key(pallet, item, value) {
+        if let Some(key) = self.checked_key(pallet, item, value, false) {
+            self.injects[key] = json!(value);
+        }
+    }
+
+    fn inject_required(&mut self, pallet: &str, item: &str, value: impl AsRef<str>) {
+        let value = value.as_ref();
+        if let Some(key) = self.checked_key(pallet, item, value, true) {
             self.injects[key] = json!(value);
         }
     }
 
     fn inject_map(&mut self, pallet: &str, item: &str, key_suffix: &str, value: impl AsRef<str>) {
         let value = value.as_ref();
-        if let Some(key) = self.checked_key(pallet, item, value) {
+        if let Some(key) = self.checked_key(pallet, item, value, false) {
             self.injects[format!("{key}{key_suffix}")] = json!(value);
         }
+    }
+
+    fn inject_map_required(
+        &mut self,
+        pallet: &str,
+        item: &str,
+        key_suffix: &str,
+        value: impl AsRef<str>,
+    ) {
+        let value = value.as_ref();
+        if let Some(key) = self.checked_key(pallet, item, value, true) {
+            self.injects[format!("{key}{key_suffix}")] = json!(value);
+        }
+    }
+
+    /// Item the runtime must have, whose value is too large to be worth
+    /// verifying (a multi-MB runtime blob decodes into millions of `Value`
+    /// nodes and the value is built by us from `Encode` anyway).
+    fn inject_map_unverified(
+        &mut self,
+        pallet: &str,
+        item: &str,
+        key_suffix: &str,
+        value: impl AsRef<str>,
+    ) {
+        if let Some(meta) = self.meta {
+            if !meta.has_item(pallet, item) {
+                self.errors.push(format!(
+                    "{pallet}::{item} is not in the runtime, so it can't be set"
+                ));
+                return;
+            }
+        }
+        let key = storage_key(pallet, item);
+        self.injects[format!("{key}{key_suffix}")] = json!(value.as_ref());
     }
 
     /// Well-known keys that are not pallet storage items (`:code`,
@@ -127,13 +206,16 @@ async fn inject_authorized_upgrade(set: &mut OverrideSet<'_>, upgrade_wasm: &str
         "{}01",
         hex::encode(subhasher::blake2_256(&wasm_content[..]))
     );
-    set.inject("System", "AuthorizedUpgrade", value);
+    set.inject_required("System", "AuthorizedUpgrade", value);
 }
 
 /// Patch `num_cores` into the live `HostConfiguration`, leaving every other
 /// field the production chain configured (executor params, async backing,
-/// max_pov_size) untouched. Falls back to a per-relay blob when the live value
-/// is unavailable, which loses those fields - hence the warning.
+/// max_pov_size) untouched.
+///
+/// The built-in per-relay blob is only used when the source can't be reached at
+/// all: it is a snapshot of a past runtime, so it drops whatever the live chain
+/// has configured since.
 async fn host_config(
     relay: &Relaychain,
     num_cores: u32,
@@ -141,15 +223,16 @@ async fn host_config(
 ) -> Result<String, anyhow::Error> {
     if let Some(meta) = meta {
         let key = storage_key("Configuration", "ActiveConfig");
-        if let Some(live) = meta.storage_value(&key).await? {
-            let patched = patch_num_cores(meta, &live, num_cores)?;
-            info!(
-                "Configuration::ActiveConfig patched from the live value (num_cores -> {num_cores})"
-            );
-            return Ok(patched);
-        }
-        warn!("Configuration::ActiveConfig not readable from the source, falling back to the built-in host config (executor params and async backing settings of the live chain are lost)");
+        let live = meta
+            .storage_value(&key)
+            .await?
+            .ok_or_else(|| anyhow::anyhow!("Configuration::ActiveConfig is empty on the source chain, refusing to replace it with a built-in blob"))?;
+        let patched = patch_num_cores(meta, &live, num_cores)?;
+        info!("Configuration::ActiveConfig patched from the live value (num_cores -> {num_cores})");
+        return Ok(patched);
     }
+
+    warn!("using the built-in host config: it is a snapshot of a past runtime, so executor params, async backing settings and max_pov_size of the live chain are lost");
 
     let cores = array_bytes::bytes2hex("", num_cores.encode());
     Ok(match relay {
@@ -184,17 +267,6 @@ fn patch_num_cores(
             set_field(value, "num_cores", cores)
         }
     })
-}
-
-fn nested_mut<'v>(value: &'v mut ScaleValue<u32>, field: &str) -> Option<&'v mut ScaleValue<u32>> {
-    use zombienet_sdk::subxt::ext::scale_value::{Composite, ValueDef};
-    let ValueDef::Composite(Composite::Named(fields)) = &mut value.value else {
-        return None;
-    };
-    fields
-        .iter_mut()
-        .find(|(name, _)| name == field)
-        .map(|(_, v)| v)
 }
 
 /// Generate the injects for Session.NextKeys storage overrides for validators
@@ -399,7 +471,7 @@ pub async fn generate_default_overrides_for_rc(
     let num_validators = crate::config::num_validators_for_cores(req_cores);
     let validator_keys = get_validator_keys(num_validators as usize);
 
-    let mut set = OverrideSet::new(meta);
+    let mut set = OverrideSet::new(meta.map(|m| m as &dyn RuntimeCheck));
 
     generate_rc_overrides(&mut set, &validator_keys);
 
@@ -433,7 +505,7 @@ pub async fn generate_default_overrides_for_rc(
 
     // update the overrides / injects map to use IFF the key is provided
     if let Ok(sudo_key) = env::var("ZOMBIE_SUDO") {
-        set.set("Sudo", "Key", &sudo_key);
+        set.set_required("Sudo", "Key", &sudo_key);
         set.inject("RcMigrator", "Manager", &sudo_key);
     }
 
@@ -458,18 +530,18 @@ pub async fn generate_default_overrides_for_rc(
             let code_hash = hex::encode(subhasher::blake2_256(&wasm_content[..]));
             let para_id_map_key = crate::utils::para_id_for_map_hash(para.id());
 
-            set.set_map("Paras", "CurrentCodeHash", &para_id_map_key, &code_hash);
+            set.set_map_required("Paras", "CurrentCodeHash", &para_id_map_key, &code_hash);
 
             // CodeByHash / CodeByHashRefs are injected since the map key is the
             // hash of the code itself, so they are never in the imported state.
             let validation_code: ValidationCode = ValidationCode(wasm_content);
-            set.inject_map(
+            set.inject_map_unverified(
                 "Paras",
                 "CodeByHash",
                 &code_hash,
                 hex::encode(validation_code.encode()),
             );
-            set.inject_map("Paras", "CodeByHashRefs", &code_hash, "01000000");
+            set.inject_map_required("Paras", "CodeByHashRefs", &code_hash, "01000000");
         }
     }
 
@@ -505,7 +577,7 @@ pub async fn generate_default_overrides_for_para(
     let seed = format!("Collator-{}", para.id());
     let key_to_use = generate_collator_key_from_seed(&seed, key_type);
 
-    let mut set = OverrideSet::new(meta);
+    let mut set = OverrideSet::new(meta.map(|m| m as &dyn RuntimeCheck));
 
     set.set("Session", "Validators", format!("04{key_to_use}"));
     set.set(
@@ -682,6 +754,11 @@ mod test {
             overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
             array_bytes::bytes2hex("", expected_groups.encode())
         );
+        // pin the wire bytes too: compact(2) then each group with its own compact len
+        assert_eq!(
+            overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
+            "0804000000000401000000"
+        );
 
         // Para Id Parachains
         assert_eq!(
@@ -785,5 +862,80 @@ mod test {
             set.injects[storage_key("System", "AuthorizedUpgrade")],
             json!(expected)
         );
+    }
+
+    /// Runtime check stub: `present` lists the items the runtime has, and any
+    /// value equal to `bad_value` fails verification.
+    struct FakeRuntime {
+        present: Vec<(&'static str, &'static str)>,
+        bad_value: &'static str,
+    }
+
+    impl RuntimeCheck for FakeRuntime {
+        fn has_item(&self, pallet: &str, item: &str) -> bool {
+            self.present.iter().any(|(p, i)| *p == pallet && *i == item)
+        }
+
+        fn verify_value(
+            &self,
+            pallet: &str,
+            item: &str,
+            value_hex: &str,
+        ) -> Result<(), anyhow::Error> {
+            if value_hex == self.bad_value {
+                anyhow::bail!("{pallet}::{item}: bad value");
+            }
+            Ok(())
+        }
+    }
+
+    #[test]
+    fn missing_item_is_skipped_but_required_one_is_an_error() {
+        let runtime = FakeRuntime {
+            present: vec![("Session", "Validators")],
+            bad_value: "",
+        };
+
+        let mut set = OverrideSet::new(Some(&runtime));
+        set.set("Session", "Validators", "04ff");
+        // absent from the runtime: dropped quietly
+        set.set("ValidatorSet", "Validators", "04ff");
+        // absent but explicitly requested: must fail the bite
+        set.inject_required("System", "AuthorizedUpgrade", "04ff");
+
+        assert_eq!(set.overrides[storage_key("Session", "Validators")], "04ff");
+        assert_eq!(set.skipped, vec!["ValidatorSet::Validators"]);
+        let err = set.finish("test").unwrap_err().to_string();
+        assert!(err.contains("System::AuthorizedUpgrade"), "got: {err}");
+    }
+
+    #[test]
+    fn value_that_fails_verification_fails_the_bite() {
+        let runtime = FakeRuntime {
+            present: vec![("Session", "Validators")],
+            bad_value: "deadbeef",
+        };
+
+        let mut set = OverrideSet::new(Some(&runtime));
+        set.set("Session", "Validators", "deadbeef");
+
+        assert!(set.overrides.as_object().unwrap().is_empty());
+        let err = set.finish("test").unwrap_err().to_string();
+        assert!(err.contains("bad value"), "got: {err}");
+    }
+
+    #[test]
+    fn unverified_map_inject_still_requires_the_item() {
+        let runtime = FakeRuntime {
+            present: vec![],
+            bad_value: "",
+        };
+
+        let mut set = OverrideSet::new(Some(&runtime));
+        // a huge wasm blob is not verified, but the item must exist
+        set.inject_map_unverified("Paras", "CodeByHash", "aa", "00ff");
+
+        let err = set.finish("test").unwrap_err().to_string();
+        assert!(err.contains("Paras::CodeByHash"), "got: {err}");
     }
 }

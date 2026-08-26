@@ -110,7 +110,9 @@ zombie-bite spawn -d /tmp/base_path --apply-upgrade
 
 #### Overrides are checked against the runtime
 
-Storage keys are derived from pallet and item names, items the runtime does not have are skipped, and a value that does not survive a decode/encode round-trip against its real on-chain type fails the bite instead of silently landing as something else. `HostConfiguration` is patched from the live value (only `num_cores` changes) rather than replaced, so executor params and async-backing settings of the bitten chain are preserved. A parachain needs an `rpc_endpoint` for its overrides to be verified this way.
+Storage keys are derived from pallet and item names, and every value is decoded against its real on-chain type and required to re-encode byte-identically, so a renamed item or changed type fails the bite instead of silently landing as something else. Items the runtime does not have are skipped — except ones you asked for explicitly (a carried upgrade, a wasm override, `ZOMBIE_SUDO`), which are errors. `HostConfiguration` is patched from the live value (only `num_cores` changes) rather than replaced, so executor params, async backing and `max_pov_size` of the bitten chain are preserved.
+
+Metadata and the live values are read at the block being bitten (`--rc-bite-at` / a para's `bite_at`), so they match the state being imported. Parachains use a default public endpoint when no `rpc_endpoint` is configured; if it can't be reached, the bite still runs with a warning and those overrides go unverified. Custom parachains are only verified when their config supplies an `rpc_endpoint`.
 
 #### Spawn
 
