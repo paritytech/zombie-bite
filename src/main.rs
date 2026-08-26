@@ -13,6 +13,7 @@ use zombienet_sdk::{LocalFileSystem, Network, NetworkNode};
 mod cli;
 mod config;
 mod doppelganger;
+mod manifest;
 mod metadata;
 mod monit;
 mod overrides;
@@ -259,6 +260,8 @@ async fn main() -> Result<(), anyhow::Error> {
             }
 
             resolve_if_dir_exist(&resolved_config.base_path, step).await;
+
+            manifest::warn_on_binary_mismatch(resolved_config.base_path.as_path()).await;
 
             let network =
                 doppelganger::spawn(step, resolved_config.base_path.as_path(), None, None)

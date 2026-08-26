@@ -114,6 +114,10 @@ Storage keys are derived from pallet and item names, and every value is decoded 
 
 Metadata and the live values are read at the block being bitten (`--rc-bite-at` / a para's `bite_at`), so they match the state being imported. Parachains use a default public endpoint when no `rpc_endpoint` is configured; if it can't be reached, the bite still runs with a warning and those overrides go unverified. Custom parachains are only verified when their config supplies an `rpc_endpoint`.
 
+#### Bundle manifest
+
+A bite writes a `manifest.json` next to `ready.json` describing the bite bundle: per chain the bite block, source RPC, spec and snapshot file names with sizes, and any carried upgrade, plus the `doppelganger` versions that produced the snapshots. A later `spawn` warns when the local binaries differ, because a snapshot from a newer node fails to restore in ways that otherwise look like corruption.
+
 #### Spawn
 
 Spawn a new instance of the _bited_ network with the following cmd:

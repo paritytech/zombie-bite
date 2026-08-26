@@ -40,6 +40,7 @@ use crate::utils::{
 use crate::config::{
     get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain, Step,
 };
+use crate::manifest::{self, ChainEntry, Manifest};
 use crate::metadata::ChainMetadata;
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
@@ -56,6 +57,9 @@ struct ChainArtifact {
     chain: String,
     spec_path: String,
     snap_path: String,
+    /// Size of the snapshot, measured when it is written: later steps can move
+    /// it (ZOMBIE_BITE_CI_PATH) and then it can no longer be stat'ed here.
+    snap_bytes: Option<u64>,
     override_wasm: Option<String>,
     para_id: Option<u32>,
 }
@@ -206,6 +210,7 @@ pub async fn doppelganger_inner(
         let snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain_name);
         trace!("snap_path: {snap_path}");
         generate_snap(&sync_db_path, &snap_path).await.unwrap();
+        let snap_bytes = manifest::file_size(&snap_path).await;
 
         let para_head_str = read_to_string(&sync_head_path)
             .unwrap_or_else(|_| panic!("read para_head ({sync_head_path}) file should works."));
@@ -235,6 +240,7 @@ pub async fn doppelganger_inner(
             },
             spec_path: chain_spec_path,
             snap_path,
+            snap_bytes,
             override_wasm: para.wasm_overrides().map(str::to_string),
             para_id: Some(para.id()),
         });
@@ -327,6 +333,7 @@ pub async fn doppelganger_inner(
     // generate the data.tgz to use as snapshot
     let r_snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain);
     generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
+    let r_snap_bytes = manifest::file_size(&r_snap_path).await;
 
     let relay_artifacts = ChainArtifact {
         // cmd: context_relay.doppelganger_cmd(),
@@ -334,13 +341,14 @@ pub async fn doppelganger_inner(
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
+        snap_bytes: r_snap_bytes,
         override_wasm: relay_chain.wasm_overrides().map(str::to_string),
         para_id: None,
     };
 
     let config = generate_config(
-        relay_artifacts,
-        para_artifacts,
+        relay_artifacts.clone(),
+        para_artifacts.clone(),
         Some(global_base_dir.clone()),
         database,
         req_cores,
@@ -451,9 +459,80 @@ pub async fn doppelganger_inner(
     )
     .await;
 
+    let mut manifest = build_manifest(
+        &relay_chain,
+        &paras_to,
+        &ready_content,
+        &relay_artifacts,
+        &para_artifacts,
+    );
+    manifest.binaries = manifest::binary_versions().await;
+    manifest.write(&global_base_dir).await?;
+
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
+}
+
+fn build_manifest(
+    relay_chain: &Relaychain,
+    paras_to: &[Parachain],
+    ready: &serde_json::Value,
+    relay_artifacts: &ChainArtifact,
+    para_artifacts: &[ChainArtifact],
+) -> Manifest {
+    let file_name = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+    };
+
+    let relay = ChainEntry {
+        chain: relay_chain.as_chain_string(),
+        para_id: None,
+        bite_block: ready["rc_start_block"].as_u64(),
+        source_rpc: ready["rc_source_rpc"].as_str().map(str::to_string),
+        spec_file: file_name(&relay_artifacts.spec_path),
+        snapshot_file: file_name(&relay_artifacts.snap_path),
+        snapshot_bytes: relay_artifacts.snap_bytes,
+        upgrade_file: ready["rc_upgrade_wasm"].as_str().map(str::to_string),
+        upgrade_hash: ready["rc_upgrade_hash"].as_str().map(str::to_string),
+    };
+
+    // para_artifacts is built in paras_to order, so zip keeps them aligned.
+    let parachains = paras_to
+        .iter()
+        .zip(para_artifacts)
+        .map(|(para, artifact)| {
+            let id = para.id();
+            ChainEntry {
+                chain: para.as_chain_string(&relay_chain.as_chain_string()),
+                para_id: Some(id),
+                bite_block: ready[format!("para_{id}_start_block")].as_u64(),
+                source_rpc: ready[format!("para_{id}_source_rpc")]
+                    .as_str()
+                    .map(str::to_string),
+                spec_file: file_name(&artifact.spec_path),
+                snapshot_file: file_name(&artifact.snap_path),
+                snapshot_bytes: artifact.snap_bytes,
+                upgrade_file: ready[format!("para_{id}_upgrade_wasm")]
+                    .as_str()
+                    .map(str::to_string),
+                upgrade_hash: ready[format!("para_{id}_upgrade_hash")]
+                    .as_str()
+                    .map(str::to_string),
+            }
+        })
+        .collect();
+
+    Manifest {
+        version: manifest::VERSION,
+        bundle: Step::Bite.dir(),
+        created_at: manifest::now_unix(),
+        relay,
+        parachains,
+        binaries: vec![],
+    }
 }
 
 async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
@@ -1195,6 +1274,7 @@ mod test {
             chain: "polkadot".into(),
             spec_path: relay_spec_path.into(),
             snap_path: relay_snap_path.into(),
+            snap_bytes: None,
             override_wasm: None,
             para_id: None,
         };
@@ -1203,6 +1283,7 @@ mod test {
             chain: "ah-polkadot".into(),
             spec_path: ah_spec_path.into(),
             snap_path: ah_snap_path.into(),
+            snap_bytes: None,
             override_wasm: None,
             para_id: Some(1000),
         };
