@@ -234,6 +234,16 @@ pub enum Relaychain {
         maybe_sync_url: MaybeSyncUrl,
         maybe_bite_at: MaybeByteAt,
     },
+    /// A relay chain that is not one of the public networks: its name is used
+    /// for the artifact file names, and the chain-spec and endpoint have to be
+    /// supplied because there is nothing to look them up from.
+    Custom {
+        name: String,
+        chain_spec: MaybeChainSpec,
+        maybe_override: MaybeWasmOverridePath,
+        maybe_sync_url: MaybeSyncUrl,
+        maybe_bite_at: MaybeByteAt,
+    },
 }
 
 impl Relaychain {
@@ -254,11 +264,36 @@ impl Relaychain {
                 maybe_sync_url: None,
                 maybe_bite_at: None,
             },
-            _ => Self::Polkadot {
+            "polkadot" => Self::Polkadot {
                 maybe_override: None,
                 maybe_sync_url: None,
                 maybe_bite_at: None,
             },
+            // Keeps a custom relay's artifact names working in the helper
+            // subcommands, which only get the name back as a string.
+            other => Self::Custom {
+                name: other.to_string(),
+                chain_spec: None,
+                maybe_override: None,
+                maybe_sync_url: None,
+                maybe_bite_at: None,
+            },
+        }
+    }
+
+    pub fn new_custom(
+        name: impl Into<String>,
+        chain_spec: impl Into<String>,
+        rpc: impl Into<String>,
+        maybe_override: MaybeWasmOverridePath,
+        maybe_bite_at: MaybeByteAt,
+    ) -> Self {
+        Self::Custom {
+            name: name.into(),
+            chain_spec: Some(chain_spec.into()),
+            maybe_override,
+            maybe_sync_url: Some(rpc.into()),
+            maybe_bite_at,
         }
     }
 
@@ -284,7 +319,14 @@ impl Relaychain {
                 maybe_sync_url,
                 maybe_bite_at,
             },
-            _ => Self::Polkadot {
+            "polkadot" => Self::Polkadot {
+                maybe_override,
+                maybe_sync_url,
+                maybe_bite_at,
+            },
+            other => Self::Custom {
+                name: other.to_string(),
+                chain_spec: None,
                 maybe_override,
                 maybe_sync_url,
                 maybe_bite_at,
@@ -293,12 +335,7 @@ impl Relaychain {
     }
 
     pub fn as_local_chain_string(&self) -> String {
-        String::from(match self {
-            Relaychain::Polkadot { .. } => "polkadot-local",
-            Relaychain::Kusama { .. } => "kusama-local",
-            Relaychain::Paseo { .. } => "paseo-local",
-            Relaychain::Westend { .. } => "westend-local",
-        })
+        format!("{}-local", self.as_chain_string())
     }
 
     pub fn as_chain_string(&self) -> String {
@@ -307,7 +344,29 @@ impl Relaychain {
             Relaychain::Kusama { .. } => "kusama",
             Relaychain::Paseo { .. } => "paseo",
             Relaychain::Westend { .. } => "westend",
+            Relaychain::Custom { name, .. } => name,
         })
+    }
+
+    /// Chain-spec of a custom relay; the public networks are known to the node
+    /// by name.
+    pub fn chain_spec(&self) -> Option<&str> {
+        match self {
+            Relaychain::Custom { chain_spec, .. } => chain_spec.as_deref(),
+            _ => None,
+        }
+    }
+
+    /// Value for the node's `--chain`: a spec path for a custom relay, the
+    /// network name otherwise.
+    pub fn chain_arg(&self) -> String {
+        self.chain_spec()
+            .map(str::to_string)
+            .unwrap_or_else(|| self.as_chain_string())
+    }
+
+    pub fn is_custom(&self) -> bool {
+        matches!(self, Relaychain::Custom { .. })
     }
 
     /// Endpoint supplied with `--rc-sync-url` / the config's `sync_url`, used
@@ -320,7 +379,8 @@ impl Relaychain {
             Relaychain::Polkadot { maybe_sync_url, .. }
             | Relaychain::Kusama { maybe_sync_url, .. }
             | Relaychain::Paseo { maybe_sync_url, .. }
-            | Relaychain::Westend { maybe_sync_url, .. } => maybe_sync_url.as_deref(),
+            | Relaychain::Westend { maybe_sync_url, .. }
+            | Relaychain::Custom { maybe_sync_url, .. } => maybe_sync_url.as_deref(),
         }
     }
 
@@ -330,6 +390,8 @@ impl Relaychain {
             Relaychain::Kusama { .. } => "wss://kusama-rpc.polkadot.io",
             Relaychain::Paseo { .. } => "wss://paseo-rpc.dwellir.com",
             Relaychain::Westend { .. } => "wss://westend-rpc.n.dwellir.com",
+            // A custom relay has no public endpoint to fall back to.
+            Relaychain::Custom { .. } => "",
         }
     }
 
@@ -354,7 +416,8 @@ impl Relaychain {
             Relaychain::Kusama { maybe_override, .. }
             | Relaychain::Polkadot { maybe_override, .. }
             | Relaychain::Westend { maybe_override, .. }
-            | Relaychain::Paseo { maybe_override, .. } => maybe_override.as_deref(),
+            | Relaychain::Paseo { maybe_override, .. }
+            | Relaychain::Custom { maybe_override, .. } => maybe_override.as_deref(),
         }
     }
 
@@ -363,6 +426,9 @@ impl Relaychain {
             Relaychain::Paseo { .. } => 600,
             Relaychain::Kusama { .. } => 600,
             Relaychain::Westend { .. } => 600,
+            // TODO: read it from the chain instead of assuming a testnet-sized
+            // epoch for a custom relay.
+            Relaychain::Custom { .. } => 600,
             _ => 2400,
         }
     }
@@ -372,7 +438,8 @@ impl Relaychain {
             Relaychain::Kusama { maybe_bite_at, .. }
             | Relaychain::Polkadot { maybe_bite_at, .. }
             | Relaychain::Westend { maybe_bite_at, .. }
-            | Relaychain::Paseo { maybe_bite_at, .. } => *maybe_bite_at,
+            | Relaychain::Paseo { maybe_bite_at, .. }
+            | Relaychain::Custom { maybe_bite_at, .. } => *maybe_bite_at,
         }
     }
 }
@@ -615,7 +682,7 @@ pub fn generate_network_config(
         Relaychain::Polkadot { .. } | Relaychain::Kusama { .. } | Relaychain::Westend { .. } => {
             CMD_TPL
         }
-        Relaychain::Paseo { .. } => DEFAULT_CHAIN_SPEC_TPL_COMMAND,
+        Relaychain::Paseo { .. } | Relaychain::Custom { .. } => DEFAULT_CHAIN_SPEC_TPL_COMMAND,
     };
 
     // Calculate required validators based on parachain count
@@ -1142,9 +1209,12 @@ mod test {
         let paseo = Relaychain::new("paseo");
         assert_eq!(paseo.as_chain_string(), "paseo");
 
-        // Unknown defaults to polkadot
+        // An unknown name is a custom relay keeping its name, not a silent
+        // fallback to polkadot: the helper subcommands name artifacts after it,
+        // and a typo now fails instead of biting the wrong chain.
         let unknown = Relaychain::new("unknown");
-        assert_eq!(unknown.as_chain_string(), "polkadot");
+        assert_eq!(unknown.as_chain_string(), "unknown");
+        assert!(unknown.is_custom());
     }
 
     #[test]

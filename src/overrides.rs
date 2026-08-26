@@ -232,6 +232,13 @@ async fn host_config(
         return Ok(patched);
     }
 
+    if relay.is_custom() {
+        anyhow::bail!(
+            "{}: there is no built-in host config for a custom relay, so the bite needs to read Configuration::ActiveConfig from it - check the endpoint",
+            relay.as_chain_string()
+        );
+    }
+
     warn!("using the built-in host config: it is a snapshot of a past runtime, so executor params, async backing settings and max_pov_size of the live chain are lost");
 
     let cores = array_bytes::bytes2hex("", num_cores.encode());
@@ -245,6 +252,7 @@ async fn host_config(
         Relaychain::Kusama { .. } => {
             format!("0000300000500000aaaa0a0000004000fbff0000800000000a000000100e00005802000006000000020000000000a00000c800001e000000005039278c0400000000000000000000005039278c040000000000000000000019000000009001001e000000009001000c01002000000600c4090000000000000601983a0000000000008070000001bc0200000600000058020000030000002b010000000000001e00000006000000020000001400000002000000100b060000000a0000000a000000010500000005000000{}f401000080b2e60e80c3c90100f2052a01000000000000000000000000000000", cores)
         }
+        Relaychain::Custom { .. } => unreachable!("custom relays bail above"),
         Relaychain::Paseo { .. } => {
             format!("e067350000800000aaaa020000001000fbff0000100000000a0000003c0000003c00000003000000020000000000a00000c800001e0000000000000000000000000000000000000000000000000000000000000000000000e8030000009001001e000000009001000c01002000000600c4090000000000000601983a000000000000b00400000006000000640000000200000019000000000000000200000002000000020000000500000001000000100b010000000a00000004000000010300000005000000{}6400000080b2e60e80c3c9018096980000000000000000000000000000000000", cores)
         }
@@ -671,7 +679,7 @@ mod test {
         let paras = vec![];
         let _path = generate_default_overrides_for_rc(
             "/tmp",
-            &crate::config::Relaychain::new("polakdot"),
+            &crate::config::Relaychain::new("polkadot"),
             &paras,
             2,
             None,

@@ -278,7 +278,7 @@ pub async fn doppelganger_inner(
     let (sync_node, sync_db_path, sync_chain) = sync_relay_only(
         ns.clone(),
         "doppelganger",
-        relay_chain.as_chain_string(),
+        &relay_chain,
         para_heads_env,
         rc_default_overrides_path,
         &rc_info_path,
@@ -299,18 +299,21 @@ pub async fn doppelganger_inner(
         ns.clone(),
         &r_chain_spec_path,
         &context_relay.doppelganger_cmd(),
-        &sync_chain,
+        &relay_chain.chain_arg(),
     )
     .await
     .unwrap();
 
     // remove `parachains` db
+    // The node keeps its db under the chain-spec's own id, which is not always
+    // the name we use for the artifacts.
+    let spec_id = spec_chain_id(&r_chain_spec_path).await;
     let sync_chain_in_path = if sync_chain == "kusama" {
-        "ksmcc3"
+        "ksmcc3".to_string()
     } else if sync_chain == "westend" {
-        "westend2"
+        "westend2".to_string()
     } else {
-        sync_chain.as_str()
+        spec_id.unwrap_or_else(|| sync_chain.clone())
     };
 
     let parachains_path = if database == "rocksdb" {
@@ -454,6 +457,13 @@ pub async fn doppelganger_inner(
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
+}
+
+/// `id` of a chain-spec, which is the directory the node stores its db under.
+async fn spec_chain_id(spec_path: &str) -> Option<String> {
+    let content = fs::read_to_string(spec_path).await.ok()?;
+    let spec: serde_json::Value = serde_json::from_str(&content).ok()?;
+    spec["id"].as_str().map(str::to_string)
 }
 
 async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {

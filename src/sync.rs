@@ -23,7 +23,7 @@ const PASEO_ASSET_HUB_SPEC_URL: &str =
 pub async fn sync_relay_only(
     ns: DynNamespace,
     cmd: impl AsRef<str>,
-    chain: impl AsRef<str>,
+    relaychain: &Relaychain,
     para_heads_env: Vec<(String, String)>,
     overrides_path: PathBuf,
     info_path: impl AsRef<str>,
@@ -51,18 +51,20 @@ pub async fn sync_relay_only(
     env.push(("ZOMBIE_RC_OVERRIDES_PATH".to_string(), rc_overrides_path));
     env.push(("RUST_LOG".into(), "doppelganger=debug".into()));
     env.push(("ZOMBIE_INFO_PATH".into(), info_path.as_ref().into()));
-    env.push(("ZOMBIE_CHAIN".into(), chain.as_ref().into()));
+    // A custom relay is passed as a chain-spec path; the public networks are
+    // known to the node by name.
+    let chain = relaychain.chain_arg();
+    let chain = chain.as_str();
+    env.push(("ZOMBIE_CHAIN".into(), chain.into()));
 
-    // get the epoch duration from the chain config
-    let rc = Relaychain::new(chain.as_ref());
     env.push((
         "ZOMBIE_RC_EPOCH_DURATION".into(),
-        rc.epoch_duration().to_string(),
+        relaychain.epoch_duration().to_string(),
     ));
 
     // if we are sync westend, let doppelganger know to bypass
     // justification checks
-    if chain.as_ref() == "westend" {
+    if chain == "westend" {
         env.push(("ZOMBIE_IS_WESTEND".into(), "1".into()));
     }
 
@@ -72,7 +74,7 @@ pub async fn sync_relay_only(
     let opts = SpawnNodeOptions::new("sync-node", cmd.as_ref())
         .args(vec![
             "--chain",
-            chain.as_ref(),
+            chain,
             "--sync",
             "warp",
             "-d",
@@ -98,9 +100,9 @@ pub async fn sync_relay_only(
     wait_ws_ready(&metrics_url).await.unwrap();
     let url = reqwest::Url::try_from(metrics_url.as_str()).unwrap();
     wait_sync(url).await.unwrap();
-    info!("✅ Synced (chain: {})", chain.as_ref());
+    info!("✅ Synced (chain: {})", chain);
     // we should just paused
-    Ok((sync_node, sync_db_path, chain.as_ref().to_string()))
+    Ok((sync_node, sync_db_path, relaychain.as_chain_string()))
 }
 
 #[allow(clippy::too_many_arguments)]

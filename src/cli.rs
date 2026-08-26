@@ -29,7 +29,9 @@ pub enum Commands {
         /// The network will be using for bite
         /// If not specified, will use the value from config.
         /// If not in config, defaults to polkadot.
-        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo", "westend"]))]
+        /// For a relay that is not a public network use:
+        /// custom%<name>%<rpc_endpoint>%<chain_spec_path>
+        #[arg(short = 'r', long = "rc", verbatim_doc_comment)]
         relay: Option<String>,
         /// If provided we will override the runtime as part of the process of 'bite'
         /// The resulting network will be running with this runtime.
@@ -210,8 +212,9 @@ pub fn resolve_bite_config(
         "polkadot".to_string()
     };
 
-    let relaychain = if relay_runtime.is_some() || rc_sync_url.is_some() || relay_bite_at.is_some()
-    {
+    let relaychain = if relay_network.starts_with("custom%") {
+        resolve_custom_relaychain(&relay_network, relay_runtime.clone(), relay_bite_at)?
+    } else if relay_runtime.is_some() || rc_sync_url.is_some() || relay_bite_at.is_some() {
         // CLI args provided, use them
         Relaychain::new_with_values(&relay_network, relay_runtime, rc_sync_url, relay_bite_at)
     } else if let Some(ref config) = config_file {
@@ -426,6 +429,29 @@ pub fn resolve_spawn_config(
     })
 }
 
+/// custom%<name>%<rpc_endpoint>%<chain_spec_path>
+fn resolve_custom_relaychain(
+    s: &str,
+    maybe_override: Option<String>,
+    maybe_bite_at: Option<u32>,
+) -> Result<Relaychain, anyhow::Error> {
+    let parts: Vec<&str> = s.splitn(4, '%').collect();
+    if parts.len() != 4 {
+        bail!("custom relay must be custom%<name>%<rpc_endpoint>%<chain_spec_path>, got '{s}'");
+    }
+    let (name, rpc, chain_spec) = (parts[1], parts[2], parts[3]);
+    if name.is_empty() || rpc.is_empty() || chain_spec.is_empty() {
+        bail!("custom relay needs a name, an rpc endpoint and a chain-spec path, got '{s}'");
+    }
+    Ok(Relaychain::new_custom(
+        name,
+        chain_spec,
+        rpc,
+        maybe_override,
+        maybe_bite_at,
+    ))
+}
+
 fn resolve_custom_parachain(s: &str) -> Parachain {
     let parts: Vec<&str> = s.splitn(5, '%').collect();
     trace!("custom parts: {parts:?}");
@@ -517,5 +543,46 @@ mod test {
     fn custom_para_cores_parse_err() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%abc";
         let _para = resolve_custom_parachain(s);
+    }
+    #[test]
+    fn custom_relay_works() {
+        let rc = resolve_custom_relaychain(
+            "custom%previewnet%wss://previewnet.example.com%/path/to/previewnet.json",
+            None,
+            Some(42),
+        )
+        .unwrap();
+
+        assert_eq!(rc.as_chain_string(), "previewnet");
+        assert_eq!(rc.chain_spec(), Some("/path/to/previewnet.json"));
+        // a custom relay is passed to the node as a spec path, not a name
+        assert_eq!(rc.chain_arg(), "/path/to/previewnet.json");
+        assert_eq!(rc.rpc_endpoint(), "wss://previewnet.example.com");
+        assert_eq!(rc.sync_endpoint(), "wss://previewnet.example.com");
+        assert_eq!(rc.at_block(), Some(42));
+        assert!(rc.is_custom());
+    }
+
+    #[test]
+    fn custom_relay_needs_every_part() {
+        for bad in [
+            "custom%previewnet%wss://previewnet.example.com",
+            "custom%previewnet%%/path/to/spec.json",
+            "custom%%wss://x%/path/to/spec.json",
+        ] {
+            assert!(
+                resolve_custom_relaychain(bad, None, None).is_err(),
+                "should reject '{bad}'"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_relay_name_keeps_its_name() {
+        // helper subcommands only get the name back as a string, and the
+        // artifacts are named after it
+        let rc = Relaychain::new("previewnet");
+        assert_eq!(rc.as_chain_string(), "previewnet");
+        assert!(rc.is_custom());
     }
 }
