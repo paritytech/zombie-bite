@@ -722,6 +722,9 @@ pub struct ZombieBiteConfig {
     /// parachains are the ones being bitten); wrong for a shared relay, where
     /// the mismatch makes cumulus panic with `HRMP head mismatch`.
     pub keep_messaging_state: Option<bool>,
+    /// Hostname or IP to advertise the spawned nodes under in the published
+    /// chain-specs.
+    pub publish_bootnodes: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1217,6 +1220,7 @@ mod test {
             with_monitor: None,
             apply_upgrade: None,
             keep_messaging_state: None,
+            publish_bootnodes: None,
         };
 
         assert_eq!(config.get_parachains().len(), 0);
@@ -1272,6 +1276,7 @@ mod test {
             with_monitor: None,
             apply_upgrade: None,
             keep_messaging_state: None,
+            publish_bootnodes: None,
         };
 
         let parachains = config.get_parachains();
