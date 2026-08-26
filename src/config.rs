@@ -295,23 +295,39 @@ impl Relaychain {
         })
     }
 
-    // TODO: make this endpoints configurables
-    pub fn sync_endpoint(&self) -> String {
-        String::from(match self {
+    /// Endpoint supplied with `--rc-sync-url` / the config's `sync_url`, used
+    /// instead of the public default. Both the parachain sync and the reads the
+    /// bite does against the source go through it: the reason to pass it is that
+    /// the public endpoint is unusable (rate limited, down, or not reachable
+    /// from where the bite runs).
+    pub fn sync_url(&self) -> Option<&str> {
+        match self {
+            Relaychain::Polkadot { maybe_sync_url, .. }
+            | Relaychain::Kusama { maybe_sync_url, .. }
+            | Relaychain::Paseo { maybe_sync_url, .. }
+            | Relaychain::Westend { maybe_sync_url, .. } => maybe_sync_url.as_deref(),
+        }
+    }
+
+    fn default_endpoint(&self) -> &'static str {
+        match self {
             Relaychain::Polkadot { .. } => "wss://rpc.polkadot.io",
             Relaychain::Kusama { .. } => "wss://kusama-rpc.polkadot.io",
             Relaychain::Paseo { .. } => "wss://paseo-rpc.dwellir.com",
             Relaychain::Westend { .. } => "wss://westend-rpc.n.dwellir.com",
-        })
+        }
+    }
+
+    pub fn sync_endpoint(&self) -> String {
+        self.sync_url()
+            .unwrap_or_else(|| self.default_endpoint())
+            .to_string()
     }
 
     pub fn rpc_endpoint(&self) -> String {
-        String::from(match self {
-            Relaychain::Polkadot { .. } => "wss://rpc.polkadot.io",
-            Relaychain::Kusama { .. } => "wss://kusama-rpc.polkadot.io",
-            Relaychain::Paseo { .. } => "wss://paseo-rpc.dwellir.com",
-            Relaychain::Westend { .. } => "wss://westend-rpc.n.dwellir.com",
-        })
+        self.sync_url()
+            .unwrap_or_else(|| self.default_endpoint())
+            .to_string()
     }
 
     pub fn context(&self) -> Context {
@@ -1509,5 +1525,20 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
         assert_eq!(parachains.len(), 1);
         let para_config = parachains.first().unwrap();
         assert_eq!(para_config.id(), 3392);
+    }
+    #[test]
+    fn sync_url_overrides_the_public_endpoint() {
+        let default = Relaychain::new("kusama");
+        assert_eq!(default.sync_endpoint(), "wss://kusama-rpc.polkadot.io");
+        assert_eq!(default.rpc_endpoint(), "wss://kusama-rpc.polkadot.io");
+
+        let custom = Relaychain::new_with_values(
+            "kusama",
+            None,
+            Some("wss://my-own-kusama.example.com".to_string()),
+            None,
+        );
+        assert_eq!(custom.sync_endpoint(), "wss://my-own-kusama.example.com");
+        assert_eq!(custom.rpc_endpoint(), "wss://my-own-kusama.example.com");
     }
 }
