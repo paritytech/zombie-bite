@@ -184,7 +184,22 @@ impl Upgrades {
     }
 }
 
-pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain) -> u32 {
+/// Per-parachain core counts from configuration, keyed by para id. Overrides
+/// the built-in defaults below, which mirror the live networks.
+pub type CoresOverride = std::collections::HashMap<u32, u32>;
+
+/// Everything a bite needs beyond the chains themselves.
+#[derive(Debug, Default, Clone)]
+pub struct BiteOptions {
+    pub upgrades: Upgrades,
+    pub cores: CoresOverride,
+    pub keep_messaging_state: bool,
+}
+
+pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain, override_: &CoresOverride) -> u32 {
+    if let Some(cores) = override_.get(&para.id()) {
+        return *cores;
+    }
     match para {
         Parachain::AssetHub { .. } => 3,
         Parachain::People { .. } => match relay {
@@ -520,6 +535,28 @@ impl Parachain {
         }
     }
 
+    /// Endpoint used to read the parachain's metadata when none is configured,
+    /// so overrides are checked against the runtime by default. A wrong or
+    /// unreachable guess only costs the verification (with a warning), never the
+    /// bite itself.
+    // TODO: same as the relay endpoints, these should be configurable.
+    pub fn default_rpc_endpoint(&self, relay: &Relaychain) -> Option<String> {
+        let prefix = match self {
+            Parachain::AssetHub { .. } => "asset-hub",
+            Parachain::Coretime { .. } => "coretime",
+            Parachain::People { .. } => "people",
+            Parachain::BridgeHub { .. } => "bridge-hub",
+            Parachain::Collectives { .. } => "collectives",
+            // A custom para is only reachable through the endpoint its config
+            // supplies.
+            Parachain::Custom { .. } => return None,
+        };
+        Some(format!(
+            "wss://{prefix}-{}-rpc.n.dwellir.com",
+            relay.as_chain_string()
+        ))
+    }
+
     pub fn chain_spec_path(&self) -> Option<&str> {
         match self {
             Parachain::Custom { chain_spec, .. } => Some(chain_spec.as_str()),
@@ -680,6 +717,11 @@ pub struct ZombieBiteConfig {
     pub and_spawn: Option<bool>,
     pub with_monitor: Option<bool>,
     pub apply_upgrade: Option<bool>,
+    /// Keep inherited HRMP/DMP state instead of clearing it. Correct when the
+    /// relay and parachain snapshots agree on channel heads (a relay whose only
+    /// parachains are the ones being bitten); wrong for a shared relay, where
+    /// the mismatch makes cumulus panic with `HRMP head mismatch`.
+    pub keep_messaging_state: Option<bool>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1174,6 +1216,7 @@ mod test {
             and_spawn: None,
             with_monitor: None,
             apply_upgrade: None,
+            keep_messaging_state: None,
         };
 
         assert_eq!(config.get_parachains().len(), 0);
@@ -1228,6 +1271,7 @@ mod test {
             and_spawn: None,
             with_monitor: None,
             apply_upgrade: None,
+            keep_messaging_state: None,
         };
 
         let parachains = config.get_parachains();

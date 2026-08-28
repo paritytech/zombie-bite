@@ -1,3 +1,4 @@
+use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
 use std::{
     env,
@@ -7,7 +8,9 @@ use std::{
 };
 use tracing::{trace, warn};
 
-use crate::config::{Parachain, Relaychain, Upgrades, ZombieBiteConfig};
+use crate::config::{
+    BiteOptions, CoresOverride, Parachain, Relaychain, Upgrades, ZombieBiteConfig,
+};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -47,6 +50,15 @@ pub enum Commands {
         /// for every carried upgrade and wait until it enacts.
         #[arg(long, default_value_t = false, verbatim_doc_comment)]
         apply_upgrade: bool,
+        /// Keep the inherited HRMP/DMP state instead of clearing it. Only correct
+        /// when the relay's parachains are exactly the ones being bitten, so the
+        /// two snapshots agree on channel heads.
+        #[arg(long, default_value_t = false, verbatim_doc_comment)]
+        keep_messaging_state: bool,
+        /// Override the cores assigned to a parachain, format: <para_id>=<cores>
+        /// Can be set multiple times, once per para.
+        #[arg(long = "para-cores", verbatim_doc_comment)]
+        para_cores: Vec<String>,
         /// If provided we will _bite_ the live network at the supplied block hieght
         #[arg(long = "rc-bite-at", verbatim_doc_comment)]
         relay_bite_at: Option<u32>,
@@ -154,8 +166,8 @@ pub struct ResolvedBiteConfig {
     pub parachains: Vec<Parachain>,
     pub base_path: PathBuf,
     pub and_spawn: bool,
-    pub upgrades: Upgrades,
     pub apply_upgrade: bool,
+    pub opts: BiteOptions,
 }
 
 #[derive(Debug)]
@@ -178,6 +190,8 @@ pub fn resolve_bite_config(
     relay_upgrade: Option<String>,
     para_upgrade: Vec<String>,
     apply_upgrade: bool,
+    keep_messaging_state: bool,
+    para_cores: Vec<String>,
 ) -> Result<ResolvedBiteConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -281,20 +295,19 @@ pub fn resolve_bite_config(
     };
 
     // Resolve upgrades (CLI overrides config file)
+    let mut para_upgrades = std::collections::HashMap::new();
+    for entry in &para_upgrade {
+        let (id, path) = entry.split_once('=').ok_or_else(|| {
+            anyhow!("--para-upgrade must be <para_id>=<wasm_path>, got '{entry}'")
+        })?;
+        let id: u32 = id
+            .parse()
+            .map_err(|_| anyhow!("invalid para_id '{id}' in --para-upgrade"))?;
+        para_upgrades.insert(id, path.to_string());
+    }
     let mut upgrades = Upgrades {
         relay: relay_upgrade,
-        paras: para_upgrade
-            .iter()
-            .map(|entry| {
-                let (id, path) = entry.split_once('=').unwrap_or_else(|| {
-                    panic!("--para-upgrade format must be <para_id>=<wasm_path>, got: {entry}")
-                });
-                let id: u32 = id
-                    .parse()
-                    .unwrap_or_else(|_| panic!("Invalid para_id '{id}' in --para-upgrade"));
-                (id, path.to_string())
-            })
-            .collect(),
+        paras: para_upgrades,
     };
     if let Some(ref config) = config_file {
         if upgrades.relay.is_none() {
@@ -315,13 +328,57 @@ pub fn resolve_bite_config(
         false
     };
 
+    // Per-para cores: CLI entries win over the config file's `cores`.
+    let mut cores: CoresOverride = CoresOverride::new();
+    if let Some(ref config) = config_file {
+        for para_cfg in config.parachains.as_deref().unwrap_or_default() {
+            if let (Some(c), Some(para)) = (para_cfg.cores, para_cfg.to_parachain()) {
+                cores.insert(para.id(), c);
+            }
+        }
+    }
+    for entry in &para_cores {
+        let (id, c) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--para-cores must be <para_id>=<cores>, got '{entry}'"))?;
+        let id: u32 = id
+            .parse()
+            .map_err(|_| anyhow!("invalid para_id '{id}' in --para-cores"))?;
+        let c: u32 = c
+            .parse()
+            .map_err(|_| anyhow!("invalid cores '{c}' in --para-cores"))?;
+        if c == 0 {
+            bail!("--para-cores {id}=0: a parachain with no cores can't have blocks backed");
+        }
+        cores.insert(id, c);
+    }
+    // A core count for a para that is not part of the bite is a typo, not a
+    // silently ignorable no-op.
+    for id in cores.keys() {
+        if !resolved_parachains.iter().any(|para| para.id() == *id) {
+            bail!("--para-cores/config sets cores for para {id}, which is not part of this bite");
+        }
+    }
+
+    let resolved_keep_messaging = if keep_messaging_state {
+        true
+    } else if let Some(ref config) = config_file {
+        config.keep_messaging_state.unwrap_or(false)
+    } else {
+        false
+    };
+
     Ok(ResolvedBiteConfig {
         relaychain,
         parachains: resolved_parachains,
         base_path: resolved_base_path,
         and_spawn: resolved_and_spawn,
-        upgrades,
         apply_upgrade: resolved_apply_upgrade,
+        opts: BiteOptions {
+            upgrades,
+            cores,
+            keep_messaging_state: resolved_keep_messaging,
+        },
     })
 }
 

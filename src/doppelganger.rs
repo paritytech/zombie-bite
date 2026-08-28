@@ -21,7 +21,7 @@ use flate2::Compression;
 use tar::Builder;
 
 use tracing::debug;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 use zombienet_configuration::shared::types::AssetLocation;
 use zombienet_configuration::NetworkConfigBuilder;
 use zombienet_orchestrator::network::Network;
@@ -38,8 +38,9 @@ use crate::utils::{
 };
 
 use crate::config::{
-    get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, Step, Upgrades,
+    get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain, Step,
 };
+use crate::metadata::ChainMetadata;
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
 
@@ -64,7 +65,7 @@ pub async fn doppelganger_inner(
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,
     database: &str,
-    upgrades: &Upgrades,
+    opts: &BiteOptions,
 ) -> Result<(), anyhow::Error> {
     // Star the node and wait until finish (with temp dir managed by us)
     info!(
@@ -93,13 +94,31 @@ pub async fn doppelganger_inner(
     // Parachain sync
     let mut syncs = vec![];
     for para in &paras_to {
+        let para_meta = match para
+            .rpc_endpoint()
+            .map(str::to_string)
+            .or_else(|| para.default_rpc_endpoint(&relay_chain))
+        {
+            Some(url) => {
+                ChainMetadata::fetch(&format!("para {}", para.id()), &url, para.at_block()).await
+            }
+            None => {
+                warn!(
+                    "para {}: no 'rpc_endpoint' configured, overrides will not be verified against the runtime",
+                    para.id()
+                );
+                None
+            }
+        };
         let para_default_overrides_path = generate_default_overrides_for_para(
             &base_dir_str,
             para,
             &relay_chain,
-            upgrades.paras.get(&para.id()).map(String::as_str),
+            opts.upgrades.paras.get(&para.id()).map(String::as_str),
+            para_meta.as_ref(),
+            opts.keep_messaging_state,
         )
-        .await;
+        .await?;
         let info_path = format!("{base_dir_str}/para-{}.txt", para.id());
 
         let maybe_target_header_path = if let Some(at_block) = para.at_block() {
@@ -222,16 +241,25 @@ pub async fn doppelganger_inner(
     }
 
     let req_cores: u32 = paras_to.iter().fold(0u32, |acc, para| {
-        acc + get_assigned_cores(&relay_chain, para)
+        acc + get_assigned_cores(&relay_chain, para, &opts.cores)
     });
+    let rc_meta = ChainMetadata::fetch(
+        &relay_chain.as_chain_string(),
+        &relay_chain.rpc_endpoint(),
+        relay_chain.at_block(),
+    )
+    .await;
     let rc_default_overrides_path = generate_default_overrides_for_rc(
         &base_dir_str,
         &relay_chain,
         &paras_to,
         req_cores,
-        upgrades.relay.as_deref(),
+        opts.upgrades.relay.as_deref(),
+        rc_meta.as_ref(),
+        &opts.cores,
+        opts.keep_messaging_state,
     )
-    .await;
+    .await?;
     let rc_info_path = format!("{base_dir_str}/rc_info.txt");
     // RELAYCHAIN sync
 
@@ -368,14 +396,14 @@ pub async fn doppelganger_inner(
     // Carried upgrade blobs live next to ready.json (outside the step dirs, so
     // they survive clean-up) and must match the seeded System::AuthorizedUpgrade.
     let global_base_dir_str = global_base_dir.to_string_lossy();
-    if let Some(upgrade_wasm) = &upgrades.relay {
+    if let Some(upgrade_wasm) = &opts.upgrades.relay {
         let blob_name = format!("{}-upgrade.wasm", relay_chain.as_chain_string());
         let (blob, hash) = copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
         ready_content["rc_upgrade_wasm"] = json!(blob);
         ready_content["rc_upgrade_hash"] = json!(hash);
     }
     for para in &paras_to {
-        if let Some(upgrade_wasm) = upgrades.paras.get(&para.id()) {
+        if let Some(upgrade_wasm) = opts.upgrades.paras.get(&para.id()) {
             let blob_name = format!(
                 "{}-upgrade.wasm",
                 para.as_chain_string(&relay_chain.as_chain_string())
