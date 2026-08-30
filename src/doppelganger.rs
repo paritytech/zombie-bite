@@ -331,8 +331,12 @@ pub async fn doppelganger_inner(
     generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
 
     let relay_artifacts = ChainArtifact {
-        // cmd: context_relay.doppelganger_cmd(),
-        cmd: context_relay.cmd(),
+        // The relay validators must run the doppelganger binary: it honours
+        // ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION, without which
+        // the stock dispute coordinator scans ancestor headers a warp-synced
+        // bite does not have, never initializes, and caps finality at the bite
+        // block forever while blocks keep being produced.
+        cmd: context_relay.doppelganger_cmd(),
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
