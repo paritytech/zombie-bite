@@ -427,6 +427,7 @@ fn augment_overrides_for_paras(
     paras: &[&Parachain],
     cores_override: &CoresOverride,
     keep_messaging_state: bool,
+    meta: Option<&ChainMetadata>,
 ) {
     // Generate paras_parachains
     let para_ids: Vec<u32> = paras.iter().map(|para| para.id()).collect();
@@ -439,6 +440,7 @@ fn augment_overrides_for_paras(
     // used to assign cores
     let mut core_index = 0_u32;
     let mut para_scheduler_value_parts: Vec<String> = vec![];
+    let mut core_plan: Vec<(u32, u32)> = vec![];
 
     for para in paras.iter() {
         let para_id = ParaId(para.id());
@@ -464,16 +466,92 @@ fn augment_overrides_for_paras(
         let para_cores = get_assigned_cores(relay, para, cores_override);
         for _ in 0..para_cores {
             para_scheduler_value_parts.push(core_assignment::generate(core_index, para.id()));
+            core_plan.push((core_index, para.id()));
             core_index += 1;
         }
     }
 
-    let count_prefix = format!("{:02x}", para_scheduler_value_parts.len() * 4);
-    let core_assign_value = format!("{count_prefix}{}", para_scheduler_value_parts.join(""));
-    // key is generated with prefix (`0x`), and the item is not in metadata on
-    // every runtime, so it goes in raw.
-    let scheduler_key = core_assignment::get_parascheduler_storage_key();
-    set.set_raw(&scheduler_key[2..], core_assign_value);
+    // `CoreDescriptors` is the value whose hand-rolled encoding has already
+    // produced silently-corrupt forks, so with metadata it is built against the
+    // runtime's own type. The raw fallback is only for a bite with no source
+    // access.
+    match core_descriptors_value(meta, &core_plan) {
+        Some(Ok(value)) => {
+            set.set_required("ParaScheduler", "CoreDescriptors", value);
+        }
+        Some(Err(e)) => set.errors.push(e.to_string()),
+        None => {
+            let count_prefix = format!("{:02x}", para_scheduler_value_parts.len() * 4);
+            let core_assign_value =
+                format!("{count_prefix}{}", para_scheduler_value_parts.join(""));
+            let scheduler_key = core_assignment::get_parascheduler_storage_key();
+            set.set_raw(&scheduler_key[2..], core_assign_value);
+        }
+    }
+}
+
+/// The scheduler's `BTreeMap<CoreIndex, CoreDescriptor>`: every planned core
+/// runs its parachain full time. `None` without metadata.
+fn core_descriptors_value(
+    meta: Option<&ChainMetadata>,
+    core_plan: &[(u32, u32)],
+) -> Option<Result<String, anyhow::Error>> {
+    use zombienet_sdk::subxt::ext::scale_value::{Composite, Value as V, ValueDef};
+
+    let meta = meta?;
+    // A whole core, in the parts-per-57600 unit the scheduler uses.
+    const FULL_CORE: u128 = 57600;
+
+    fn none() -> V<()> {
+        V::variant("None", Composite::Unnamed(vec![]))
+    }
+    fn tuple(items: Vec<V<()>>) -> V<()> {
+        V {
+            value: ValueDef::Composite(Composite::Unnamed(items)),
+            context: (),
+        }
+    }
+    fn record(fields: Vec<(&str, V<()>)>) -> V<()> {
+        V {
+            value: ValueDef::Composite(Composite::Named(
+                fields
+                    .into_iter()
+                    .map(|(n, v)| (n.to_string(), v))
+                    .collect(),
+            )),
+            context: (),
+        }
+    }
+
+    let entries: Vec<V<()>> = core_plan
+        .iter()
+        .map(|(core, para)| {
+            let assignment = tuple(vec![
+                V::variant("Task", Composite::Unnamed(vec![V::u128(*para as u128)])),
+                record(vec![
+                    ("ratio", V::u128(FULL_CORE)),
+                    ("remaining", V::u128(FULL_CORE)),
+                ]),
+            ]);
+            let work_state = record(vec![
+                ("assignments", tuple(vec![assignment])),
+                ("end_hint", none()),
+                ("pos", V::u128(0)),
+                ("step", V::u128(FULL_CORE)),
+            ]);
+            let descriptor = record(vec![
+                ("queue", none()),
+                (
+                    "current_work",
+                    V::variant("Some", Composite::Unnamed(vec![work_state])),
+                ),
+            ]);
+            tuple(vec![V::u128(*core as u128), descriptor])
+        })
+        .collect();
+    let map = tuple(entries).map_context(|_| 0_u32);
+
+    Some(meta.encode_value("ParaScheduler", "CoreDescriptors", &map))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -507,6 +585,7 @@ pub async fn generate_default_overrides_for_rc(
         &paras_refs,
         cores_override,
         keep_messaging_state,
+        meta,
     );
 
     set.set(
@@ -733,7 +812,7 @@ mod test {
 
         let mut set = OverrideSet::new(None);
         generate_rc_overrides(&mut set, &validator_keys, 2);
-        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), false);
+        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), false, None);
         let overrides = set.overrides;
 
         // ValidatorSet Validators
@@ -827,7 +906,7 @@ mod test {
 
         let mut set = OverrideSet::new(None);
         generate_rc_overrides(&mut set, &validator_keys, 2);
-        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), true);
+        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), true, None);
 
         let keys: Vec<&String> = set
             .overrides
@@ -855,7 +934,7 @@ mod test {
         let scheduler_key = core_assignment::get_parascheduler_storage_key();
         let assignment = |cores: &CoresOverride| {
             let mut set = OverrideSet::new(None);
-            augment_overrides_for_paras(&mut set, &rc, &[&para], cores, false);
+            augment_overrides_for_paras(&mut set, &rc, &[&para], cores, false, None);
             set.overrides[&scheduler_key[2..]]
                 .as_str()
                 .unwrap()
