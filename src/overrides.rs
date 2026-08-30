@@ -298,6 +298,7 @@ fn generate_next_keys_injects(
 fn generate_rc_overrides(
     set: &mut OverrideSet<'_>,
     validator_keys: &[&crate::utils::ValidatorKeys],
+    req_cores: u32,
 ) {
     let num_validators = validator_keys.len();
 
@@ -342,9 +343,14 @@ fn generate_rc_overrides(
         .collect::<Vec<_>>()
         .join("");
 
-    // ValidatorGroups is Vec<Vec<ValidatorIndex>>, so each single-validator group
-    // carries its own compact length prefix.
-    let validator_groups: Vec<Vec<u32>> = (0..num_validators as u32).map(|i| vec![i]).collect();
+    // ValidatorGroups is Vec<Vec<ValidatorIndex>>, one group per *core* (the
+    // scheduler and approval subsystems index groups by core), validators
+    // spread round-robin so no group is empty.
+    let num_groups = req_cores.max(1) as usize;
+    let mut validator_groups: Vec<Vec<u32>> = vec![vec![]; num_groups];
+    for v in 0..num_validators as u32 {
+        validator_groups[v as usize % num_groups].push(v);
+    }
     let validator_groups = array_bytes::bytes2hex("", validator_groups.encode());
 
     // Build para validator keys (same as authority discovery for our purposes)
@@ -383,6 +389,11 @@ fn generate_rc_overrides(
         format!("{validator_count_hex}{grandpa_authorities}"),
     );
     set.set("ParaScheduler", "ValidatorGroups", &validator_groups);
+    // Stock runtimes have no `:UsePreviousValidators:` hook, so without this the
+    // first session rotation re-elects the production validators - whose
+    // Session::NextKeys the bite has just replaced - and authoring halts an
+    // epoch in. Forcing::ForceNone keeps the dev set elected.
+    set.inject("Staking", "ForceEra", "02");
     set.set(
         "ParasShared",
         "ActiveValidatorIndices",
@@ -477,11 +488,16 @@ pub async fn generate_default_overrides_for_rc(
     keep_messaging_state: bool,
 ) -> Result<PathBuf, anyhow::Error> {
     let num_validators = crate::config::num_validators_for_cores(req_cores);
+    if req_cores > num_validators {
+        anyhow::bail!(
+            "{req_cores} cores requested but only {num_validators} dev validators exist; every core needs a validator group, so reduce per-para cores"
+        );
+    }
     let validator_keys = get_validator_keys(num_validators as usize);
 
     let mut set = OverrideSet::new(meta.map(|m| m as &dyn RuntimeCheck));
 
-    generate_rc_overrides(&mut set, &validator_keys);
+    generate_rc_overrides(&mut set, &validator_keys, req_cores);
 
     // add the paras related keys to override
     let paras_refs: Vec<&Parachain> = paras.iter().collect();
@@ -716,7 +732,7 @@ mod test {
         let rc = Relaychain::new("polkadot");
 
         let mut set = OverrideSet::new(None);
-        generate_rc_overrides(&mut set, &validator_keys);
+        generate_rc_overrides(&mut set, &validator_keys, 2);
         augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), false);
         let overrides = set.overrides;
 
@@ -756,7 +772,7 @@ mod test {
             "08be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25ffe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e"
         );
 
-        // ParaScheduler ValidatorGroups: Vec<Vec<ValidatorIndex>>, two groups of one
+        // ParaScheduler ValidatorGroups: one group per core (2), round-robin
         let expected_groups: Vec<Vec<u32>> = vec![vec![0], vec![1]];
         assert_eq!(
             overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
@@ -810,7 +826,7 @@ mod test {
         let rc = Relaychain::new("polkadot");
 
         let mut set = OverrideSet::new(None);
-        generate_rc_overrides(&mut set, &validator_keys);
+        generate_rc_overrides(&mut set, &validator_keys, 2);
         augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), true);
 
         let keys: Vec<&String> = set
