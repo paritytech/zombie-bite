@@ -697,6 +697,12 @@ pub async fn clean_up_dir_for_step(
 
     let mut needed_files: Vec<String> = vec!["config.toml".to_string(), rc_spec.clone()];
 
+    // The overrides that were applied are part of the bundle: without them a
+    // restored bite cannot show what was changed in the state it carries.
+    if step == Step::Bite {
+        needed_files.push("rc_overrides.json".to_string());
+    }
+
     // Add parachain files dynamically
     for para in paras {
         let para_chain_name = para.as_chain_string(&rc.as_chain_string());
@@ -704,6 +710,9 @@ pub async fn clean_up_dir_for_step(
         let para_snap = format!("{}-snap.tgz", para_chain_name);
         needed_files.push(para_spec);
         needed_files.push(para_snap);
+        if step == Step::Bite {
+            needed_files.push(format!("{}_overrides.json", para.id()));
+        }
     }
 
     if step == Step::Bite {
@@ -711,6 +720,20 @@ pub async fn clean_up_dir_for_step(
     } else {
         needed_files.push(alice_snap);
     }
+
+    // Overrides are only there when this step generated them; a missing
+    // spec or snapshot below is still a hard error.
+    let mut present = vec![];
+    for file in needed_files {
+        if file.ends_with("_overrides.json")
+            && !fs::try_exists(format!("{debug_path}/{file}")).await?
+        {
+            warn!("{file} not found, it will not be part of the bundle");
+            continue;
+        }
+        present.push(file);
+    }
+    let needed_files = present;
 
     for file in &needed_files {
         let from = format!("{debug_path}/{file}");

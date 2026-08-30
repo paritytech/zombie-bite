@@ -11,6 +11,7 @@ use tracing_subscriber::EnvFilter;
 use zombienet_sdk::{LocalFileSystem, Network, NetworkNode};
 
 mod bootnodes;
+mod bundle;
 mod cli;
 mod config;
 mod doppelganger;
@@ -270,6 +271,7 @@ async fn main() -> Result<(), anyhow::Error> {
             step,
             apply_upgrade,
             publish_bootnodes,
+            bundle,
         } => {
             let resolved_config = resolve_spawn_config(
                 config,
@@ -279,6 +281,11 @@ async fn main() -> Result<(), anyhow::Error> {
                 publish_bootnodes,
             )?;
             let step: Step = step.into();
+
+            if let Some(bundle) = bundle {
+                bundle::unpack(Path::new(&bundle), resolved_config.base_path.as_path()).await?;
+            }
+
             let base_path_str = resolved_config.base_path.to_string_lossy();
 
             if !fs::try_exists(format!("{base_path_str}/{}", step.dir_from()))
@@ -321,6 +328,15 @@ async fn main() -> Result<(), anyhow::Error> {
                 resolved_config.publish_bootnodes,
             )
             .await?;
+        }
+        Commands::Pack {
+            base_path,
+            step,
+            out,
+        } => {
+            let base_path = get_base_path(base_path);
+            let step: Step = step.into();
+            bundle::pack(&base_path, step, out.map(PathBuf::from)).await?;
         }
         Commands::GenerateArtifacts {
             relay,

@@ -117,6 +117,22 @@ pub enum Commands {
         /// works on the same host.
         #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1", verbatim_doc_comment)]
         publish_bootnodes: Option<String>,
+        /// Bundle produced by 'pack' to restore into the base path before
+        /// spawning, so a bite from another machine can be spawned here.
+        #[arg(long, verbatim_doc_comment)]
+        bundle: Option<String>,
+    },
+    /// Pack a step's artifacts (specs, snapshots, overrides, manifest) into a single file.
+    Pack {
+        /// Base path holding the artifacts.
+        #[arg(long, short = 'd', verbatim_doc_comment)]
+        base_path: Option<String>,
+        /// Step to pack.
+        #[arg(short = 's', value_parser = clap::builder::PossibleValuesParser::new(["bite", "spawn", "post"]), default_value="bite")]
+        step: String,
+        /// Where to write the bundle. Defaults to '<base_path>/<step>-bundle.tgz'.
+        #[arg(long, short = 'o', verbatim_doc_comment)]
+        out: Option<String>,
     },
     /// [Helper] Generate artifacts to be used by the next step (only 'spawn' and 'post' allowed)
     GenerateArtifacts {

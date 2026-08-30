@@ -114,6 +114,17 @@ Storage keys are derived from pallet and item names, and every value is decoded 
 
 Metadata and the live values are read at the block being bitten (`--rc-bite-at` / a para's `bite_at`), so they match the state being imported. Parachains use a default public endpoint when no `rpc_endpoint` is configured; if it can't be reached, the bite still runs with a warning and those overrides go unverified. Custom parachains are only verified when their config supplies an `rpc_endpoint`.
 
+#### One artifact, restored elsewhere
+
+`pack` puts everything a spawn needs into a single file — chain-specs, db snapshots, `config.toml`, the overrides that were applied, `manifest.json`, `ready.json` and any carried upgrade blob:
+
+```sh
+zombie-bite pack -d /tmp/base_path -s bite            # -> /tmp/base_path/bite-bundle.tgz
+zombie-bite spawn -d /other/path --bundle bite-bundle.tgz
+```
+
+`spawn` re-points the spec and snapshot paths at wherever the bundle was unpacked, so the artifacts do not have to land in the directory they were produced in.
+
 #### Publishing bootnodes
 
 A published chain-spec ships with `bootNodes: []` — that is what keeps a fork from dialing the network it was forked from, but it also means a node this process did not start has no way to find the fork. `--publish-bootnodes` fills the list with the fork's own nodes, in the artifacts generated at teardown (the `bite` bundle is left untouched):
