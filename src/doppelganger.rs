@@ -210,7 +210,7 @@ pub async fn doppelganger_inner(
         let snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain_name);
         trace!("snap_path: {snap_path}");
         generate_snap(&sync_db_path, &snap_path).await.unwrap();
-        let snap_bytes = manifest::file_size(&snap_path).await;
+        let snap_bytes = fs::metadata(&snap_path).await.ok().map(|m| m.len());
 
         let para_head_str = read_to_string(&sync_head_path)
             .unwrap_or_else(|_| panic!("read para_head ({sync_head_path}) file should works."));
@@ -333,7 +333,7 @@ pub async fn doppelganger_inner(
     // generate the data.tgz to use as snapshot
     let r_snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain);
     generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
-    let r_snap_bytes = manifest::file_size(&r_snap_path).await;
+    let r_snap_bytes = fs::metadata(&r_snap_path).await.ok().map(|m| m.len());
 
     let relay_artifacts = ChainArtifact {
         // cmd: context_relay.doppelganger_cmd(),
@@ -459,14 +459,13 @@ pub async fn doppelganger_inner(
     )
     .await;
 
-    let mut manifest = build_manifest(
+    let manifest = build_manifest(
         &relay_chain,
         &paras_to,
         &ready_content,
         &relay_artifacts,
         &para_artifacts,
     );
-    manifest.binaries = manifest::binary_versions().await;
     manifest.write(&global_base_dir).await?;
 
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
@@ -531,7 +530,6 @@ fn build_manifest(
         created_at: manifest::now_unix(),
         relay,
         parachains,
-        binaries: vec![],
     }
 }
 

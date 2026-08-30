@@ -141,7 +141,7 @@ Only the address host is rewritten — port, transport and peer id stay as spawn
 
 #### Bundle manifest
 
-A bite writes a `manifest.json` next to `ready.json` describing the bite bundle: per chain the bite block, source RPC, spec and snapshot file names with sizes, and any carried upgrade, plus the `doppelganger` versions that produced the snapshots. A later `spawn` warns when the local binaries differ, because a snapshot from a newer node fails to restore in ways that otherwise look like corruption.
+A bite writes a `manifest.json` next to `ready.json` describing the bite bundle: per chain the bite block, source RPC, spec and snapshot file names with sizes, and any carried upgrade.
 
 #### Spawn
 
