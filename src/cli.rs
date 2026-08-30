@@ -12,6 +12,8 @@ use crate::config::{
     BiteOptions, CoresOverride, Parachain, Relaychain, Upgrades, ZombieBiteConfig,
 };
 
+const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];
+
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 pub struct Args {
@@ -29,6 +31,7 @@ pub enum Commands {
         /// The network will be using for bite
         /// If not specified, will use the value from config.
         /// If not in config, defaults to polkadot.
+        /// The network to bite: polkadot, kusama, paseo or westend.
         /// For a relay that is not a public network use:
         /// custom%<name>%<rpc_endpoint>%<chain_spec_path>
         #[arg(short = 'r', long = "rc", verbatim_doc_comment)]
@@ -214,6 +217,13 @@ pub fn resolve_bite_config(
 
     let relaychain = if relay_network.starts_with("custom%") {
         resolve_custom_relaychain(&relay_network, relay_runtime.clone(), relay_bite_at)?
+    } else if !KNOWN_RELAYS.contains(&relay_network.as_str()) {
+        // Anything else is a typo, not a chain to bite: a custom relay has to
+        // come with its endpoint and chain-spec.
+        bail!(
+            "unknown relay '{relay_network}'; use one of {} or custom%<name>%<rpc_endpoint>%<chain_spec_path>",
+            KNOWN_RELAYS.join(", ")
+        );
     } else if relay_runtime.is_some() || rc_sync_url.is_some() || relay_bite_at.is_some() {
         // CLI args provided, use them
         Relaychain::new_with_values(&relay_network, relay_runtime, rc_sync_url, relay_bite_at)

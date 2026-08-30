@@ -307,13 +307,12 @@ pub async fn doppelganger_inner(
     // remove `parachains` db
     // The node keeps its db under the chain-spec's own id, which is not always
     // the name we use for the artifacts.
-    let spec_id = spec_chain_id(&r_chain_spec_path).await;
     let sync_chain_in_path = if sync_chain == "kusama" {
         "ksmcc3".to_string()
     } else if sync_chain == "westend" {
         "westend2".to_string()
     } else {
-        spec_id.unwrap_or_else(|| sync_chain.clone())
+        spec_chain_id(&r_chain_spec_path).await?
     };
 
     let parachains_path = if database == "rocksdb" {
@@ -460,10 +459,16 @@ pub async fn doppelganger_inner(
 }
 
 /// `id` of a chain-spec, which is the directory the node stores its db under.
-async fn spec_chain_id(spec_path: &str) -> Option<String> {
-    let content = fs::read_to_string(spec_path).await.ok()?;
-    let spec: serde_json::Value = serde_json::from_str(&content).ok()?;
-    spec["id"].as_str().map(str::to_string)
+async fn spec_chain_id(spec_path: &str) -> Result<String, anyhow::Error> {
+    let content = fs::read_to_string(spec_path)
+        .await
+        .map_err(|e| anyhow!("can't read chain-spec {spec_path}: {e}"))?;
+    let spec: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow!("chain-spec {spec_path} is not valid json: {e}"))?;
+    spec["id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("chain-spec {spec_path} has no 'id'"))
 }
 
 async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
