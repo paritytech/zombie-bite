@@ -58,6 +58,8 @@ struct ChainArtifact {
     snap_path: String,
     override_wasm: Option<String>,
     para_id: Option<u32>,
+    /// Cores assigned to this parachain (0 for the relay).
+    cores: u32,
 }
 
 pub async fn doppelganger_inner(
@@ -237,6 +239,7 @@ pub async fn doppelganger_inner(
             snap_path,
             override_wasm: para.wasm_overrides().map(str::to_string),
             para_id: Some(para.id()),
+            cores: get_assigned_cores(&relay_chain, para, &opts.cores),
         });
     }
 
@@ -342,6 +345,7 @@ pub async fn doppelganger_inner(
         snap_path: r_snap_path,
         override_wasm: relay_chain.wasm_overrides().map(str::to_string),
         para_id: None,
+        cores: 0,
     };
 
     let config = generate_config(
@@ -845,7 +849,9 @@ async fn generate_config(
                 }
             }
 
-            if para.chain.contains("asset-hub") {
+            // Elastic scaling (more than one core) requires slot-based
+            // authoring, whatever the parachain is called.
+            if para.chain.contains("asset-hub") || para.cores > 1 {
                 para_default_args.push("--authoring=slot-based".into());
             }
 
@@ -1216,6 +1222,7 @@ mod test {
             snap_path: relay_snap_path.into(),
             override_wasm: None,
             para_id: None,
+            cores: 0,
         };
         let ah = ChainArtifact {
             cmd: "doppelganger-parachain".into(),
@@ -1224,6 +1231,7 @@ mod test {
             snap_path: ah_snap_path.into(),
             override_wasm: None,
             para_id: Some(1000),
+            cores: 3,
         };
 
         let network_config = generate_config(relay, vec![ah], None, "rocksdb", 3)
