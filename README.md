@@ -12,7 +12,7 @@
 
 You need these binaries available in your `PATH`:
 
-- [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers)
+- [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers) — v0.2.3 or newer. The bite syncs state without range proofs (a chain whose staking lives on Asset Hub cannot be synced with them: sync freezes silently at ~37%); older builds ignore that setting and freeze on such chains.
 
 ### Logical steps: Bite, Spawn, Post
 
