@@ -40,6 +40,7 @@ use crate::utils::{
 use crate::config::{
     get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain, Step,
 };
+use crate::manifest::{self, ChainEntry, Manifest};
 use crate::metadata::ChainMetadata;
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
@@ -56,6 +57,9 @@ struct ChainArtifact {
     chain: String,
     spec_path: String,
     snap_path: String,
+    /// Size of the snapshot, measured when it is written: later steps can move
+    /// it (ZOMBIE_BITE_CI_PATH) and then it can no longer be stat'ed here.
+    snap_bytes: Option<u64>,
     override_wasm: Option<String>,
     para_id: Option<u32>,
     /// Cores assigned to this parachain (0 for the relay).
@@ -208,6 +212,7 @@ pub async fn doppelganger_inner(
         let snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain_name);
         trace!("snap_path: {snap_path}");
         generate_snap(&sync_db_path, &snap_path).await.unwrap();
+        let snap_bytes = fs::metadata(&snap_path).await.ok().map(|m| m.len());
 
         let para_head_str = read_to_string(&sync_head_path)
             .unwrap_or_else(|_| panic!("read para_head ({sync_head_path}) file should works."));
@@ -237,6 +242,7 @@ pub async fn doppelganger_inner(
             },
             spec_path: chain_spec_path,
             snap_path,
+            snap_bytes,
             override_wasm: para.wasm_overrides().map(str::to_string),
             para_id: Some(para.id()),
             cores: get_assigned_cores(&relay_chain, para, &opts.cores),
@@ -332,6 +338,7 @@ pub async fn doppelganger_inner(
     // generate the data.tgz to use as snapshot
     let r_snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain);
     generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
+    let r_snap_bytes = fs::metadata(&r_snap_path).await.ok().map(|m| m.len());
 
     let relay_artifacts = ChainArtifact {
         // The relay validators must run the doppelganger binary: it honours
@@ -343,14 +350,15 @@ pub async fn doppelganger_inner(
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
+        snap_bytes: r_snap_bytes,
         override_wasm: relay_chain.wasm_overrides().map(str::to_string),
         para_id: None,
         cores: 0,
     };
 
     let config = generate_config(
-        relay_artifacts,
-        para_artifacts,
+        relay_artifacts.clone(),
+        para_artifacts.clone(),
         Some(global_base_dir.clone()),
         database,
         req_cores,
@@ -461,6 +469,15 @@ pub async fn doppelganger_inner(
     )
     .await;
 
+    let manifest = build_manifest(
+        &relay_chain,
+        &paras_to,
+        &ready_content,
+        &relay_artifacts,
+        &para_artifacts,
+    );
+    manifest.write(&global_base_dir).await?;
+
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
@@ -477,6 +494,66 @@ async fn spec_chain_id(spec_path: &str) -> Result<String, anyhow::Error> {
         .as_str()
         .map(str::to_string)
         .ok_or_else(|| anyhow!("chain-spec {spec_path} has no 'id'"))
+}
+
+fn build_manifest(
+    relay_chain: &Relaychain,
+    paras_to: &[Parachain],
+    ready: &serde_json::Value,
+    relay_artifacts: &ChainArtifact,
+    para_artifacts: &[ChainArtifact],
+) -> Manifest {
+    let file_name = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+    };
+
+    let relay = ChainEntry {
+        chain: relay_chain.as_chain_string(),
+        para_id: None,
+        bite_block: ready["rc_start_block"].as_u64(),
+        source_rpc: ready["rc_source_rpc"].as_str().map(str::to_string),
+        spec_file: file_name(&relay_artifacts.spec_path),
+        snapshot_file: file_name(&relay_artifacts.snap_path),
+        snapshot_bytes: relay_artifacts.snap_bytes,
+        upgrade_file: ready["rc_upgrade_wasm"].as_str().map(str::to_string),
+        upgrade_hash: ready["rc_upgrade_hash"].as_str().map(str::to_string),
+    };
+
+    // para_artifacts is built in paras_to order, so zip keeps them aligned.
+    let parachains = paras_to
+        .iter()
+        .zip(para_artifacts)
+        .map(|(para, artifact)| {
+            let id = para.id();
+            ChainEntry {
+                chain: para.as_chain_string(&relay_chain.as_chain_string()),
+                para_id: Some(id),
+                bite_block: ready[format!("para_{id}_start_block")].as_u64(),
+                source_rpc: ready[format!("para_{id}_source_rpc")]
+                    .as_str()
+                    .map(str::to_string),
+                spec_file: file_name(&artifact.spec_path),
+                snapshot_file: file_name(&artifact.snap_path),
+                snapshot_bytes: artifact.snap_bytes,
+                upgrade_file: ready[format!("para_{id}_upgrade_wasm")]
+                    .as_str()
+                    .map(str::to_string),
+                upgrade_hash: ready[format!("para_{id}_upgrade_hash")]
+                    .as_str()
+                    .map(str::to_string),
+            }
+        })
+        .collect();
+
+    Manifest {
+        version: manifest::VERSION,
+        bundle: Step::Bite.dir(),
+        created_at: manifest::now_unix(),
+        relay,
+        parachains,
+    }
 }
 
 async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
@@ -641,6 +718,12 @@ pub async fn clean_up_dir_for_step(
 
     let mut needed_files: Vec<String> = vec!["config.toml".to_string(), rc_spec.clone()];
 
+    // The overrides that were applied are part of the bundle: without them a
+    // restored bite cannot show what was changed in the state it carries.
+    if step == Step::Bite {
+        needed_files.push("rc_overrides.json".to_string());
+    }
+
     // Add parachain files dynamically
     for para in paras {
         let para_chain_name = para.as_chain_string(&rc.as_chain_string());
@@ -648,6 +731,9 @@ pub async fn clean_up_dir_for_step(
         let para_snap = format!("{}-snap.tgz", para_chain_name);
         needed_files.push(para_spec);
         needed_files.push(para_snap);
+        if step == Step::Bite {
+            needed_files.push(format!("{}_overrides.json", para.id()));
+        }
     }
 
     if step == Step::Bite {
@@ -655,6 +741,20 @@ pub async fn clean_up_dir_for_step(
     } else {
         needed_files.push(alice_snap);
     }
+
+    // Overrides are only there when this step generated them; a missing
+    // spec or snapshot below is still a hard error.
+    let mut present = vec![];
+    for file in needed_files {
+        if file.ends_with("_overrides.json")
+            && !fs::try_exists(format!("{debug_path}/{file}")).await?
+        {
+            warn!("{file} not found, it will not be part of the bundle");
+            continue;
+        }
+        present.push(file);
+    }
+    let needed_files = present;
 
     for file in &needed_files {
         let from = format!("{debug_path}/{file}");
@@ -1220,6 +1320,7 @@ mod test {
             chain: "polkadot".into(),
             spec_path: relay_spec_path.into(),
             snap_path: relay_snap_path.into(),
+            snap_bytes: None,
             override_wasm: None,
             para_id: None,
             cores: 0,
@@ -1229,6 +1330,7 @@ mod test {
             chain: "ah-polkadot".into(),
             spec_path: ah_spec_path.into(),
             snap_path: ah_snap_path.into(),
+            snap_bytes: None,
             override_wasm: None,
             para_id: Some(1000),
             cores: 3,

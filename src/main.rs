@@ -10,9 +10,12 @@ use tracing::{debug, info, level_filters::LevelFilter, trace, warn};
 use tracing_subscriber::EnvFilter;
 use zombienet_sdk::{LocalFileSystem, Network, NetworkNode};
 
+mod bootnodes;
+mod bundle;
 mod cli;
 mod config;
 mod doppelganger;
+mod manifest;
 mod metadata;
 mod monit;
 mod overrides;
@@ -119,8 +122,15 @@ async fn tear_down_and_generate(
     step: Step,
     network: Network<LocalFileSystem>,
     base_path: PathBuf,
+    publish_bootnodes: Option<String>,
 ) -> Result<(), anyhow::Error> {
     let rc = Relaychain::new(network.relaychain().chain());
+    // Addresses have to be read while the nodes are still up, but they are
+    // written after the artifacts are generated, so the bite bundle stays as it
+    // was and only the published one advertises this run's nodes.
+    let bootnodes = publish_bootnodes
+        .as_ref()
+        .map(|_| bootnodes::collect(&network));
     let _ = network.destroy().await;
     let teardown_signal = fs::try_exists(&stop_file).await;
 
@@ -129,9 +139,16 @@ async fn tear_down_and_generate(
         doppelganger::generate_artifacts(base_path.clone(), step, &rc)
             .await
             .expect("generate should works");
-        doppelganger::clean_up_dir_for_step(base_path, step, &rc, &[])
+        doppelganger::clean_up_dir_for_step(base_path.clone(), step, &rc, &[])
             .await
             .expect("clean-up should works");
+
+        if let (Some(host), Some(chains)) = (publish_bootnodes, bootnodes) {
+            let spec_dir = base_path.join(step.dir());
+            bootnodes::publish(&chains, &spec_dir, &host).await?;
+        }
+    } else if publish_bootnodes.is_some() {
+        warn!("--publish-bootnodes: no teardown signal, so no artifacts were generated to publish into");
     }
 
     // signal that the teardown is completed
@@ -168,6 +185,7 @@ async fn main() -> Result<(), anyhow::Error> {
             apply_upgrade,
             keep_messaging_state,
             para_cores,
+            publish_bootnodes,
         } => {
             if with_monitor && !and_spawn {
                 bail!("--with-monitor can only be used with --and-spawn");
@@ -187,8 +205,12 @@ async fn main() -> Result<(), anyhow::Error> {
                 apply_upgrade,
                 keep_messaging_state,
                 para_cores,
+                publish_bootnodes,
             )?;
 
+            if resolved_config.publish_bootnodes.is_some() && !resolved_config.and_spawn {
+                bail!("--publish-bootnodes can only be used with --and-spawn");
+            }
             if resolved_config.apply_upgrade && !resolved_config.and_spawn {
                 bail!("--apply-upgrade can only be used with --and-spawn");
             }
@@ -241,8 +263,14 @@ async fn main() -> Result<(), anyhow::Error> {
 
                 post_spawn_loop(&stop_file, &network, true).await?;
 
-                tear_down_and_generate(&stop_file, step, network, resolved_config.base_path)
-                    .await?;
+                tear_down_and_generate(
+                    &stop_file,
+                    step,
+                    network,
+                    resolved_config.base_path,
+                    resolved_config.publish_bootnodes,
+                )
+                .await?;
             }
         }
         Commands::Spawn {
@@ -251,10 +279,22 @@ async fn main() -> Result<(), anyhow::Error> {
             with_monitor,
             step,
             apply_upgrade,
+            publish_bootnodes,
+            bundle,
         } => {
-            let resolved_config =
-                resolve_spawn_config(config, base_path, with_monitor, apply_upgrade)?;
+            let resolved_config = resolve_spawn_config(
+                config,
+                base_path,
+                with_monitor,
+                apply_upgrade,
+                publish_bootnodes,
+            )?;
             let step: Step = step.into();
+
+            if let Some(bundle) = bundle {
+                bundle::unpack(Path::new(&bundle), resolved_config.base_path.as_path()).await?;
+            }
+
             let base_path_str = resolved_config.base_path.to_string_lossy();
 
             if !fs::try_exists(format!("{base_path_str}/{}", step.dir_from()))
@@ -287,7 +327,23 @@ async fn main() -> Result<(), anyhow::Error> {
 
             post_spawn_loop(&stop_file, &network, resolved_config.with_monitor).await?;
 
-            tear_down_and_generate(&stop_file, step, network, resolved_config.base_path).await?;
+            tear_down_and_generate(
+                &stop_file,
+                step,
+                network,
+                resolved_config.base_path,
+                resolved_config.publish_bootnodes,
+            )
+            .await?;
+        }
+        Commands::Pack {
+            base_path,
+            step,
+            out,
+        } => {
+            let base_path = get_base_path(base_path);
+            let step: Step = step.into();
+            bundle::pack(&base_path, step, out.map(PathBuf::from)).await?;
         }
         Commands::GenerateArtifacts {
             relay,
