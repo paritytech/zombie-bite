@@ -50,6 +50,13 @@ pub async fn sync_relay_only(
     let rc_overrides_path = overrides_path.to_string_lossy().to_string();
     env.push(("ZOMBIE_RC_OVERRIDES_PATH".to_string(), rc_overrides_path));
     env.push(("RUST_LOG".into(), "doppelganger=debug".into()));
+    // Ask for state without a range proof. A chain whose staking lives on
+    // Asset Hub cannot be synced with proofs at all: one storage map turns the
+    // responder's 2 MiB value budget into a >15 MiB proof, the cursor stops,
+    // and peers ban the node for re-requesting the same range - sync freezes
+    // silently at ~37%. Safe for a bite: the state is forked and its authority
+    // set rewritten, so a proof of what is about to be overwritten buys nothing.
+    env.push(("ZOMBIE_WARP_SKIP_PROOF".into(), "1".into()));
     env.push(("ZOMBIE_INFO_PATH".into(), info_path.as_ref().into()));
     // A custom relay is passed as a chain-spec path; the public networks are
     // known to the node by name.
@@ -147,6 +154,9 @@ pub async fn sync_para(
     env.push(("ZOMBIE_PARA_OVERRIDES_PATH", &para_overrides_path));
     env.push(("ZOMBIE_PARA_HEAD_PATH", &para_head_path));
     env.push(("RUST_LOG", "doppelganger=debug"));
+    // See sync_relay_only: without this, chains with large flat storage maps
+    // freeze silently mid state-sync.
+    env.push(("ZOMBIE_WARP_SKIP_PROOF", "1"));
     env.push(("ZOMBIE_INFO_PATH", info_path.as_ref()));
     env.push(("ZOMBIE_PARA_ID", &para_id_str));
 
