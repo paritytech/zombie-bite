@@ -341,12 +341,12 @@ pub async fn doppelganger_inner(
     let r_snap_bytes = fs::metadata(&r_snap_path).await.ok().map(|m| m.len());
 
     let relay_artifacts = ChainArtifact {
-        // The relay validators must run the doppelganger binary: it honours
-        // ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION, without which
-        // the stock dispute coordinator scans ancestor headers a warp-synced
-        // bite does not have, never initializes, and caps finality at the bite
-        // block forever while blocks keep being produced.
-        cmd: context_relay.doppelganger_cmd(),
+        // The polkadot binary must honour
+        // ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION (sdk#12247,
+        // v1.22.1+): without it the dispute coordinator scans ancestor headers
+        // a warp-synced bite does not have, never initializes, and caps
+        // finality at the bite block forever while blocks keep being produced.
+        cmd: context_relay.cmd(),
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
@@ -951,7 +951,7 @@ async fn generate_config(
 
             // Elastic scaling (more than one core) requires slot-based
             // authoring, whatever the parachain is called.
-            if para.chain.contains("asset-hub") || para.cores > 1 {
+            if para.cores > 1 {
                 para_default_args.push("--authoring=slot-based".into());
             }
 

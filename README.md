@@ -13,6 +13,7 @@
 You need these binaries available in your `PATH`:
 
 - [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers) — v0.2.3 or newer. The bite syncs state without range proofs (a chain whose staking lives on Asset Hub cannot be synced with them: sync freezes silently at ~37%); older builds ignore that setting and freeze on such chains.
+- `polkadot` and `polkadot-parachain` for the spawned network — polkadot v1.22.1 or newer: the spawn relies on `ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` ([polkadot-sdk#12247](https://github.com/paritytech/polkadot-sdk/pull/12247)); on older binaries the fork produces blocks but never finalizes.
 
 ### Logical steps: Bite, Spawn, Post
 
