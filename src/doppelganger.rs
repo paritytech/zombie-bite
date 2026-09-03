@@ -62,6 +62,8 @@ struct ChainArtifact {
     snap_bytes: Option<u64>,
     override_wasm: Option<String>,
     para_id: Option<u32>,
+    /// Cores assigned to this parachain (0 for the relay).
+    cores: u32,
 }
 
 pub async fn doppelganger_inner(
@@ -243,6 +245,7 @@ pub async fn doppelganger_inner(
             snap_bytes,
             override_wasm: para.wasm_overrides().map(str::to_string),
             para_id: Some(para.id()),
+            cores: get_assigned_cores(&relay_chain, para, &opts.cores),
         });
     }
 
@@ -284,7 +287,7 @@ pub async fn doppelganger_inner(
     let (sync_node, sync_db_path, sync_chain) = sync_relay_only(
         ns.clone(),
         "doppelganger",
-        relay_chain.as_chain_string(),
+        &relay_chain,
         para_heads_env,
         rc_default_overrides_path,
         &rc_info_path,
@@ -305,18 +308,20 @@ pub async fn doppelganger_inner(
         ns.clone(),
         &r_chain_spec_path,
         &context_relay.doppelganger_cmd(),
-        &sync_chain,
+        &relay_chain.chain_arg(),
     )
     .await
     .unwrap();
 
     // remove `parachains` db
+    // The node keeps its db under the chain-spec's own id, which is not always
+    // the name we use for the artifacts.
     let sync_chain_in_path = if sync_chain == "kusama" {
-        "ksmcc3"
+        "ksmcc3".to_string()
     } else if sync_chain == "westend" {
-        "westend2"
+        "westend2".to_string()
     } else {
-        sync_chain.as_str()
+        spec_chain_id(&r_chain_spec_path).await?
     };
 
     let parachains_path = if database == "rocksdb" {
@@ -336,7 +341,11 @@ pub async fn doppelganger_inner(
     let r_snap_bytes = fs::metadata(&r_snap_path).await.ok().map(|m| m.len());
 
     let relay_artifacts = ChainArtifact {
-        // cmd: context_relay.doppelganger_cmd(),
+        // The polkadot binary must honour
+        // ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION (sdk#12247,
+        // v1.22.1+): without it the dispute coordinator scans ancestor headers
+        // a warp-synced bite does not have, never initializes, and caps
+        // finality at the bite block forever while blocks keep being produced.
         cmd: context_relay.cmd(),
         chain: sync_chain,
         spec_path: r_chain_spec_path,
@@ -344,6 +353,7 @@ pub async fn doppelganger_inner(
         snap_bytes: r_snap_bytes,
         override_wasm: relay_chain.wasm_overrides().map(str::to_string),
         para_id: None,
+        cores: 0,
     };
 
     let config = generate_config(
@@ -471,6 +481,19 @@ pub async fn doppelganger_inner(
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
+}
+
+/// `id` of a chain-spec, which is the directory the node stores its db under.
+async fn spec_chain_id(spec_path: &str) -> Result<String, anyhow::Error> {
+    let content = fs::read_to_string(spec_path)
+        .await
+        .map_err(|e| anyhow!("can't read chain-spec {spec_path}: {e}"))?;
+    let spec: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow!("chain-spec {spec_path} is not valid json: {e}"))?;
+    spec["id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("chain-spec {spec_path} has no 'id'"))
 }
 
 fn build_manifest(
@@ -926,7 +949,9 @@ async fn generate_config(
                 }
             }
 
-            if para.chain.contains("asset-hub") {
+            // Elastic scaling (more than one core) requires slot-based
+            // authoring, whatever the parachain is called.
+            if para.cores > 1 {
                 para_default_args.push("--authoring=slot-based".into());
             }
 
@@ -1298,6 +1323,7 @@ mod test {
             snap_bytes: None,
             override_wasm: None,
             para_id: None,
+            cores: 0,
         };
         let ah = ChainArtifact {
             cmd: "doppelganger-parachain".into(),
@@ -1307,6 +1333,7 @@ mod test {
             snap_bytes: None,
             override_wasm: None,
             para_id: Some(1000),
+            cores: 3,
         };
 
         let network_config = generate_config(relay, vec![ah], None, "rocksdb", 3)

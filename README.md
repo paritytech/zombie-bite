@@ -12,7 +12,8 @@
 
 You need these binaries available in your `PATH`:
 
-- [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers)
+- [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers) — v0.2.3 or newer. The bite syncs state without range proofs (a chain whose staking lives on Asset Hub cannot be synced with them: sync freezes silently at ~37%); older builds ignore that setting and freeze on such chains.
+- `polkadot` and `polkadot-parachain` for the spawned network — polkadot v1.22.1 or newer: the spawn relies on `ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` ([polkadot-sdk#12247](https://github.com/paritytech/polkadot-sdk/pull/12247)); on older binaries the fork produces blocks but never finalizes.
 
 ### Logical steps: Bite, Spawn, Post
 
@@ -102,6 +103,20 @@ zombie-bite bite -r kusama --rc-upgrade ./kusama_runtime.wasm --and-spawn --appl
 # or later, when spawning from existing artifacts
 zombie-bite spawn -d /tmp/base_path --apply-upgrade
 ```
+
+#### Forking a relay that is not a public network
+
+`-r` also takes `custom%<name>%<rpc_endpoint>%<chain_spec_path>`, for a relay zombie-bite has no built-in knowledge of:
+
+```sh
+zombie-bite bite -d /tmp/base_path \
+  -r custom%previewnet%wss://previewnet.example.com%/path/to/previewnet.json \
+  -p custom%2000%wss://para.example.com%/path/to/para.json
+```
+
+The name is what the artifacts are named after, the endpoint is what the bite reads state and metadata from, and the chain-spec is what the node is started with. There is no built-in host config for such a relay, so the endpoint has to be reachable — `Configuration::ActiveConfig` is read from it.
+
+A relay name that is not one of `polkadot`, `kusama`, `paseo` or `westend` is treated as a custom relay rather than silently falling back to polkadot.
 
 #### Cores and messaging state
 

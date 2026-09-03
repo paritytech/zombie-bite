@@ -232,6 +232,13 @@ async fn host_config(
         return Ok(patched);
     }
 
+    if relay.is_custom() {
+        anyhow::bail!(
+            "{}: there is no built-in host config for a custom relay, so the bite needs to read Configuration::ActiveConfig from it - check the endpoint",
+            relay.as_chain_string()
+        );
+    }
+
     warn!("using the built-in host config: it is a snapshot of a past runtime, so executor params, async backing settings and max_pov_size of the live chain are lost");
 
     let cores = array_bytes::bytes2hex("", num_cores.encode());
@@ -245,6 +252,7 @@ async fn host_config(
         Relaychain::Kusama { .. } => {
             format!("0000300000500000aaaa0a0000004000fbff0000800000000a000000100e00005802000006000000020000000000a00000c800001e000000005039278c0400000000000000000000005039278c040000000000000000000019000000009001001e000000009001000c01002000000600c4090000000000000601983a0000000000008070000001bc0200000600000058020000030000002b010000000000001e00000006000000020000001400000002000000100b060000000a0000000a000000010500000005000000{}f401000080b2e60e80c3c90100f2052a01000000000000000000000000000000", cores)
         }
+        Relaychain::Custom { .. } => unreachable!("custom relays bail above"),
         Relaychain::Paseo { .. } => {
             format!("e067350000800000aaaa020000001000fbff0000100000000a0000003c0000003c00000003000000020000000000a00000c800001e0000000000000000000000000000000000000000000000000000000000000000000000e8030000009001001e000000009001000c01002000000600c4090000000000000601983a000000000000b00400000006000000640000000200000019000000000000000200000002000000020000000500000001000000100b010000000a00000004000000010300000005000000{}6400000080b2e60e80c3c9018096980000000000000000000000000000000000", cores)
         }
@@ -290,6 +298,7 @@ fn generate_next_keys_injects(
 fn generate_rc_overrides(
     set: &mut OverrideSet<'_>,
     validator_keys: &[&crate::utils::ValidatorKeys],
+    req_cores: u32,
 ) {
     let num_validators = validator_keys.len();
 
@@ -334,9 +343,14 @@ fn generate_rc_overrides(
         .collect::<Vec<_>>()
         .join("");
 
-    // ValidatorGroups is Vec<Vec<ValidatorIndex>>, so each single-validator group
-    // carries its own compact length prefix.
-    let validator_groups: Vec<Vec<u32>> = (0..num_validators as u32).map(|i| vec![i]).collect();
+    // ValidatorGroups is Vec<Vec<ValidatorIndex>>, one group per *core* (the
+    // scheduler and approval subsystems index groups by core), validators
+    // spread round-robin so no group is empty.
+    let num_groups = req_cores.max(1) as usize;
+    let mut validator_groups: Vec<Vec<u32>> = vec![vec![]; num_groups];
+    for v in 0..num_validators as u32 {
+        validator_groups[v as usize % num_groups].push(v);
+    }
     let validator_groups = array_bytes::bytes2hex("", validator_groups.encode());
 
     // Build para validator keys (same as authority discovery for our purposes)
@@ -375,6 +389,11 @@ fn generate_rc_overrides(
         format!("{validator_count_hex}{grandpa_authorities}"),
     );
     set.set("ParaScheduler", "ValidatorGroups", &validator_groups);
+    // Stock runtimes have no `:UsePreviousValidators:` hook, so without this the
+    // first session rotation re-elects the production validators - whose
+    // Session::NextKeys the bite has just replaced - and authoring halts an
+    // epoch in. Forcing::ForceNone keeps the dev set elected.
+    set.inject("Staking", "ForceEra", "02");
     set.set(
         "ParasShared",
         "ActiveValidatorIndices",
@@ -408,6 +427,7 @@ fn augment_overrides_for_paras(
     paras: &[&Parachain],
     cores_override: &CoresOverride,
     keep_messaging_state: bool,
+    meta: Option<&ChainMetadata>,
 ) {
     // Generate paras_parachains
     let para_ids: Vec<u32> = paras.iter().map(|para| para.id()).collect();
@@ -420,6 +440,7 @@ fn augment_overrides_for_paras(
     // used to assign cores
     let mut core_index = 0_u32;
     let mut para_scheduler_value_parts: Vec<String> = vec![];
+    let mut core_plan: Vec<(u32, u32)> = vec![];
 
     for para in paras.iter() {
         let para_id = ParaId(para.id());
@@ -445,16 +466,92 @@ fn augment_overrides_for_paras(
         let para_cores = get_assigned_cores(relay, para, cores_override);
         for _ in 0..para_cores {
             para_scheduler_value_parts.push(core_assignment::generate(core_index, para.id()));
+            core_plan.push((core_index, para.id()));
             core_index += 1;
         }
     }
 
-    let count_prefix = format!("{:02x}", para_scheduler_value_parts.len() * 4);
-    let core_assign_value = format!("{count_prefix}{}", para_scheduler_value_parts.join(""));
-    // key is generated with prefix (`0x`), and the item is not in metadata on
-    // every runtime, so it goes in raw.
-    let scheduler_key = core_assignment::get_parascheduler_storage_key();
-    set.set_raw(&scheduler_key[2..], core_assign_value);
+    // `CoreDescriptors` is the value whose hand-rolled encoding has already
+    // produced silently-corrupt forks, so with metadata it is built against the
+    // runtime's own type. The raw fallback is only for a bite with no source
+    // access.
+    match core_descriptors_value(meta, &core_plan) {
+        Some(Ok(value)) => {
+            set.set_required("ParaScheduler", "CoreDescriptors", value);
+        }
+        Some(Err(e)) => set.errors.push(e.to_string()),
+        None => {
+            let count_prefix = format!("{:02x}", para_scheduler_value_parts.len() * 4);
+            let core_assign_value =
+                format!("{count_prefix}{}", para_scheduler_value_parts.join(""));
+            let scheduler_key = core_assignment::get_parascheduler_storage_key();
+            set.set_raw(&scheduler_key[2..], core_assign_value);
+        }
+    }
+}
+
+/// The scheduler's `BTreeMap<CoreIndex, CoreDescriptor>`: every planned core
+/// runs its parachain full time. `None` without metadata.
+fn core_descriptors_value(
+    meta: Option<&ChainMetadata>,
+    core_plan: &[(u32, u32)],
+) -> Option<Result<String, anyhow::Error>> {
+    use zombienet_sdk::subxt::ext::scale_value::{Composite, Value as V, ValueDef};
+
+    let meta = meta?;
+    // A whole core, in the parts-per-57600 unit the scheduler uses.
+    const FULL_CORE: u128 = 57600;
+
+    fn none() -> V<()> {
+        V::variant("None", Composite::Unnamed(vec![]))
+    }
+    fn tuple(items: Vec<V<()>>) -> V<()> {
+        V {
+            value: ValueDef::Composite(Composite::Unnamed(items)),
+            context: (),
+        }
+    }
+    fn record(fields: Vec<(&str, V<()>)>) -> V<()> {
+        V {
+            value: ValueDef::Composite(Composite::Named(
+                fields
+                    .into_iter()
+                    .map(|(n, v)| (n.to_string(), v))
+                    .collect(),
+            )),
+            context: (),
+        }
+    }
+
+    let entries: Vec<V<()>> = core_plan
+        .iter()
+        .map(|(core, para)| {
+            let assignment = tuple(vec![
+                V::variant("Task", Composite::Unnamed(vec![V::u128(*para as u128)])),
+                record(vec![
+                    ("ratio", V::u128(FULL_CORE)),
+                    ("remaining", V::u128(FULL_CORE)),
+                ]),
+            ]);
+            let work_state = record(vec![
+                ("assignments", tuple(vec![assignment])),
+                ("end_hint", none()),
+                ("pos", V::u128(0)),
+                ("step", V::u128(FULL_CORE)),
+            ]);
+            let descriptor = record(vec![
+                ("queue", none()),
+                (
+                    "current_work",
+                    V::variant("Some", Composite::Unnamed(vec![work_state])),
+                ),
+            ]);
+            tuple(vec![V::u128(*core as u128), descriptor])
+        })
+        .collect();
+    let map = tuple(entries).map_context(|_| 0_u32);
+
+    Some(meta.encode_value("ParaScheduler", "CoreDescriptors", &map))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -469,11 +566,16 @@ pub async fn generate_default_overrides_for_rc(
     keep_messaging_state: bool,
 ) -> Result<PathBuf, anyhow::Error> {
     let num_validators = crate::config::num_validators_for_cores(req_cores);
+    if req_cores > num_validators {
+        anyhow::bail!(
+            "{req_cores} cores requested but only {num_validators} dev validators exist; every core needs a validator group, so reduce per-para cores"
+        );
+    }
     let validator_keys = get_validator_keys(num_validators as usize);
 
     let mut set = OverrideSet::new(meta.map(|m| m as &dyn RuntimeCheck));
 
-    generate_rc_overrides(&mut set, &validator_keys);
+    generate_rc_overrides(&mut set, &validator_keys, req_cores);
 
     // add the paras related keys to override
     let paras_refs: Vec<&Parachain> = paras.iter().collect();
@@ -483,6 +585,7 @@ pub async fn generate_default_overrides_for_rc(
         &paras_refs,
         cores_override,
         keep_messaging_state,
+        meta,
     );
 
     set.set(
@@ -671,7 +774,7 @@ mod test {
         let paras = vec![];
         let _path = generate_default_overrides_for_rc(
             "/tmp",
-            &crate::config::Relaychain::new("polakdot"),
+            &crate::config::Relaychain::new("polkadot"),
             &paras,
             2,
             None,
@@ -708,8 +811,8 @@ mod test {
         let rc = Relaychain::new("polkadot");
 
         let mut set = OverrideSet::new(None);
-        generate_rc_overrides(&mut set, &validator_keys);
-        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), false);
+        generate_rc_overrides(&mut set, &validator_keys, 2);
+        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), false, None);
         let overrides = set.overrides;
 
         // ValidatorSet Validators
@@ -748,7 +851,7 @@ mod test {
             "08be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25ffe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e"
         );
 
-        // ParaScheduler ValidatorGroups: Vec<Vec<ValidatorIndex>>, two groups of one
+        // ParaScheduler ValidatorGroups: one group per core (2), round-robin
         let expected_groups: Vec<Vec<u32>> = vec![vec![0], vec![1]];
         assert_eq!(
             overrides["94eadf0156a8ad5156507773d0471e4a16973e1142f5bd30d9464076794007db"],
@@ -802,8 +905,8 @@ mod test {
         let rc = Relaychain::new("polkadot");
 
         let mut set = OverrideSet::new(None);
-        generate_rc_overrides(&mut set, &validator_keys);
-        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), true);
+        generate_rc_overrides(&mut set, &validator_keys, 2);
+        augment_overrides_for_paras(&mut set, &rc, &paras, &CoresOverride::new(), true, None);
 
         let keys: Vec<&String> = set
             .overrides
@@ -831,7 +934,7 @@ mod test {
         let scheduler_key = core_assignment::get_parascheduler_storage_key();
         let assignment = |cores: &CoresOverride| {
             let mut set = OverrideSet::new(None);
-            augment_overrides_for_paras(&mut set, &rc, &[&para], cores, false);
+            augment_overrides_for_paras(&mut set, &rc, &[&para], cores, false, None);
             set.overrides[&scheduler_key[2..]]
                 .as_str()
                 .unwrap()

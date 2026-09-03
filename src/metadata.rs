@@ -134,6 +134,24 @@ impl ChainMetadata {
         Ok(raw.map(|v| v.trim_start_matches("0x").to_string()))
     }
 
+    /// Encode a value against the item's on-chain type, so its shape is the
+    /// runtime's rather than a hand-rolled guess.
+    pub fn encode_value(
+        &self,
+        pallet: &str,
+        item: &str,
+        value: &scale_value::Value<u32>,
+    ) -> Result<String, anyhow::Error> {
+        let ty = self
+            .value_ty(pallet, item)
+            .ok_or_else(|| anyhow!("{pallet}::{item} not in metadata"))?;
+        let mut out = vec![];
+        scale_value::scale::encode_as_type(value, ty, self.metadata.types(), &mut out).map_err(
+            |e| anyhow!("{pallet}::{item}: value does not encode against the runtime's type: {e}"),
+        )?;
+        Ok(hex::encode(out))
+    }
+
     /// Decode a live value, hand it to `patch`, and re-encode it. Only the
     /// fields `patch` touches change - everything else the live runtime
     /// configured is preserved byte for byte.

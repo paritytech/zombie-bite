@@ -218,6 +218,15 @@ async fn main() -> Result<(), anyhow::Error> {
                 bail!("--apply-upgrade needs an upgrade to carry (--rc-upgrade / --para-upgrade)");
             }
 
+            if resolved_config.relaychain.is_custom() {
+                if resolved_config.relaychain.chain_spec().is_none() {
+                    bail!("a custom relay needs a chain-spec: use -r custom%<name>%<rpc>%<chain_spec>");
+                }
+                if resolved_config.relaychain.sync_url().is_none() {
+                    bail!("a custom relay needs an rpc endpoint: use -r custom%<name>%<rpc>%<chain_spec>");
+                }
+            }
+
             debug!("{:?}", resolved_config.relaychain);
             doppelganger_inner(
                 resolved_config.base_path.clone(),
