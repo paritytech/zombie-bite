@@ -198,6 +198,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 resolved_config.parachains,
                 &database,
                 &resolved_config.upgrades,
+                &resolved_config.spawn_setup,
             )
             .await
             .expect("bite should work");

@@ -7,7 +7,7 @@ use std::{
 };
 use tracing::{trace, warn};
 
-use crate::config::{Parachain, Relaychain, Upgrades, ZombieBiteConfig};
+use crate::config::{Parachain, Relaychain, SpawnSetup, Upgrades, ZombieBiteConfig};
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -156,6 +156,7 @@ pub struct ResolvedBiteConfig {
     pub and_spawn: bool,
     pub upgrades: Upgrades,
     pub apply_upgrade: bool,
+    pub spawn_setup: SpawnSetup,
 }
 
 #[derive(Debug)]
@@ -315,6 +316,15 @@ pub fn resolve_bite_config(
         false
     };
 
+    // `command` / `image` only come from the config file, there is no cli flag
+    // for them. Validate here so a typo fails now and not after the sync.
+    let spawn_setup = if let Some(ref config) = config_file {
+        config.get_spawn_setup()
+    } else {
+        SpawnSetup::default()
+    };
+    spawn_setup.validate()?;
+
     Ok(ResolvedBiteConfig {
         relaychain,
         parachains: resolved_parachains,
@@ -322,6 +332,7 @@ pub fn resolve_bite_config(
         and_spawn: resolved_and_spawn,
         upgrades,
         apply_upgrade: resolved_apply_upgrade,
+        spawn_setup,
     })
 }
 

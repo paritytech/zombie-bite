@@ -5,7 +5,10 @@ use serde::{Deserialize, Serialize};
 // use zombienet_orchestrator::generators::chain_spec;
 use std::env;
 
-use zombienet_configuration::{NetworkConfig, NetworkConfigBuilder};
+use zombienet_configuration::{
+    types::{Command, Image},
+    NetworkConfig, NetworkConfigBuilder,
+};
 const BITE: &str = "bite";
 const SPAWN: &str = "spawn";
 const POST: &str = "post";
@@ -181,6 +184,74 @@ pub struct Upgrades {
 impl Upgrades {
     pub fn is_empty(&self) -> bool {
         self.relay.is_none() && self.paras.is_empty()
+    }
+}
+
+/// `command` / `image` for one chain, as set in the config file.
+/// They end up as `default_command` / `default_image` in the generated
+/// `config.toml` and are only meaningful at the *spawn* step.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct ChainSpawnSetup {
+    pub command: Option<String>,
+    pub image: Option<String>,
+}
+
+/// Per-chain settings that only matter at the *spawn* step. Kept out of
+/// `Relaychain`/`Parachain` because they play no part in bite/sync or in the
+/// state overrides, the same reason [`Upgrades`] is a side table.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct SpawnSetup {
+    pub relay: ChainSpawnSetup,
+    pub paras: std::collections::HashMap<u32, ChainSpawnSetup>,
+}
+
+impl SpawnSetup {
+    pub fn relay_command(&self) -> String {
+        self.relay
+            .command
+            .clone()
+            .unwrap_or_else(|| Context::Relaychain.cmd())
+    }
+
+    pub fn relay_image(&self) -> Option<&str> {
+        self.relay.image.as_deref()
+    }
+
+    pub fn para_command(&self, id: u32) -> String {
+        self.paras
+            .get(&id)
+            .and_then(|setup| setup.command.clone())
+            .unwrap_or_else(|| Context::Parachain.cmd())
+    }
+
+    pub fn para_image(&self, id: u32) -> Option<&str> {
+        self.paras.get(&id).and_then(|setup| setup.image.as_deref())
+    }
+
+    fn iter_labeled(&self) -> impl Iterator<Item = (String, &ChainSpawnSetup)> {
+        std::iter::once((String::from("relaychain"), &self.relay)).chain(
+            self.paras
+                .iter()
+                .map(|(id, setup)| (format!("parachain {id}"), setup)),
+        )
+    }
+
+    /// Validate with zombienet's own types, so we fail while reading the
+    /// config instead of panicking in `build()` after the whole sync ran.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        for (label, setup) in self.iter_labeled() {
+            if let Some(image) = &setup.image {
+                Image::try_from(image.as_str())
+                    .map_err(|e| anyhow::anyhow!("invalid `image` for {label}: {e}"))?;
+            }
+
+            if let Some(command) = &setup.command {
+                Command::try_from(command.as_str())
+                    .map_err(|e| anyhow::anyhow!("invalid `command` for {label}: {e}"))?;
+            }
+        }
+
+        Ok(())
     }
 }
 
@@ -550,13 +621,10 @@ const ONE: &str = "one";
 pub fn generate_network_config(
     network: &Relaychain,
     paras: Vec<Parachain>,
+    spawn_setup: &SpawnSetup,
 ) -> Result<NetworkConfig, anyhow::Error> {
     println!("paras: {:?}", paras);
-    // TODO: integrate k8s/docker
-    // let images = environment::get_images_from_env();
     let relay_chain = network.as_local_chain_string();
-    let relay_context = Context::Relaychain;
-    let para_context = Context::Parachain;
 
     let chain_spec_cmd = match network {
         Relaychain::Polkadot { .. } | Relaychain::Kusama { .. } | Relaychain::Westend { .. } => {
@@ -574,7 +642,15 @@ pub fn generate_network_config(
     let network_builder = NetworkConfigBuilder::new().with_relaychain(|r| {
         let relaychain_builder = r
             .with_chain(relay_chain.as_str())
-            .with_default_command(relay_context.cmd().as_str())
+            .with_default_command(spawn_setup.relay_command().as_str());
+
+        let relaychain_builder = if let Some(image) = spawn_setup.relay_image() {
+            relaychain_builder.with_default_image(image)
+        } else {
+            relaychain_builder
+        };
+
+        let relaychain_builder = relaychain_builder
             .with_chain_spec_command(chain_spec_cmd)
             .chain_spec_command_is_local(true)
             // .with_default_args(vec![("-l", "babe=debug,grandpa=debug,runtime=debug,parachain::=debug,sub-authority-discovery=trace").into()])
@@ -626,7 +702,13 @@ pub fn generate_network_config(
         builder.with_parachain(|p| {
             let p = p
                 .with_id(para.id())
-                .with_default_command(para_context.cmd().as_str());
+                .with_default_command(spawn_setup.para_command(para.id()).as_str());
+
+            let p = if let Some(image) = spawn_setup.para_image(para.id()) {
+                p.with_default_image(image)
+            } else {
+                p
+            };
 
             // Custom paras use chain_spec_path directly; system paras use chain name + spec command
             let p = if let Some(spec_path) = para.chain_spec_path() {
@@ -689,6 +771,12 @@ pub struct RelaychainConfig {
     pub sync_url: Option<String>,
     pub bite_at: Option<u32>,
     pub upgrade: Option<String>,
+    /// Binary to run the nodes of the spawned network with.
+    /// Defaults to `polkadot`.
+    pub command: Option<String>,
+    /// Image to set for the nodes of the spawned network.
+    /// Only honored by providers that use images (docker/k8s).
+    pub image: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -706,6 +794,12 @@ pub struct ParachainConfig {
     pub chain_spec: Option<String>,
     /// Number of cores to assign, NOTE: only used in `custom` paras
     pub cores: Option<u32>,
+    /// Binary to run the collator of the spawned network with.
+    /// Defaults to `polkadot-parachain`.
+    pub command: Option<String>,
+    /// Image to set for the collator of the spawned network.
+    /// Only honored by providers that use images (docker/k8s).
+    pub image: Option<String>,
 }
 
 impl ParachainConfig {
@@ -785,6 +879,36 @@ impl ZombieBiteConfig {
             .map(|paras| paras.iter().filter_map(|p| p.to_parachain()).collect())
             .unwrap_or_default()
     }
+
+    /// Collect the `command` / `image` of every chain, keyed by para id for
+    /// the parachains. Disabled parachains are skipped, since `to_parachain`
+    /// is what decides which ones make it into the network.
+    pub fn get_spawn_setup(&self) -> SpawnSetup {
+        let paras = self
+            .parachains
+            .as_deref()
+            .unwrap_or_default()
+            .iter()
+            .filter_map(|para_cfg| {
+                let para = para_cfg.to_parachain()?;
+                Some((
+                    para.id(),
+                    ChainSpawnSetup {
+                        command: para_cfg.command.clone(),
+                        image: para_cfg.image.clone(),
+                    },
+                ))
+            })
+            .collect();
+
+        SpawnSetup {
+            relay: ChainSpawnSetup {
+                command: self.relaychain.command.clone(),
+                image: self.relaychain.image.clone(),
+            },
+            paras,
+        }
+    }
 }
 
 #[cfg(test)]
@@ -793,7 +917,9 @@ mod test {
 
     #[test]
     fn config_ok() {
-        let config = generate_network_config(&Relaychain::new("kusama"), vec![]).unwrap();
+        let config =
+            generate_network_config(&Relaychain::new("kusama"), vec![], &SpawnSetup::default())
+                .unwrap();
         assert_eq!(0, config.parachains().len());
     }
 
@@ -802,6 +928,7 @@ mod test {
         let config = generate_network_config(
             &Relaychain::new("kusama"),
             vec![Parachain::new("asset-hub")],
+            &SpawnSetup::default(),
         )
         .unwrap();
         let parachain = config.parachains().first().unwrap().chain().unwrap();
@@ -813,6 +940,7 @@ mod test {
         let config = generate_network_config(
             &Relaychain::new("kusama"),
             vec![Parachain::new("asset-hub")],
+            &SpawnSetup::default(),
         )
         .unwrap();
         println!("config: {:#?}", config);
@@ -835,6 +963,8 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            command: None,
+            image: None,
         };
 
         assert!(config.to_parachain().is_some());
@@ -856,6 +986,8 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            command: None,
+            image: None,
         };
 
         assert!(config.to_parachain().is_some());
@@ -877,6 +1009,8 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            command: None,
+            image: None,
         };
 
         assert!(config.to_parachain().is_none());
@@ -895,6 +1029,8 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            command: None,
+            image: None,
         };
 
         let parachain = config.to_parachain().unwrap();
@@ -919,6 +1055,8 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            command: None,
+            image: None,
         };
 
         assert!(config.to_parachain().is_none());
@@ -939,6 +1077,8 @@ mod test {
                 id: None,
                 chain_spec: None,
                 cores: None,
+                command: None,
+                image: None,
             };
 
             assert!(
@@ -1137,7 +1277,8 @@ mod test {
             },
         ];
 
-        let config = generate_network_config(&relaychain, parachains).unwrap();
+        let config =
+            generate_network_config(&relaychain, parachains, &SpawnSetup::default()).unwrap();
         assert_eq!(config.parachains().len(), 4);
     }
 
@@ -1155,7 +1296,8 @@ mod test {
             maybe_rpc_endpoint: None,
         }];
 
-        let config = generate_network_config(&relaychain, parachains).unwrap();
+        let config =
+            generate_network_config(&relaychain, parachains, &SpawnSetup::default()).unwrap();
         assert_eq!(config.parachains().len(), 1);
     }
 
@@ -1168,6 +1310,8 @@ mod test {
                 upgrade: None,
                 sync_url: None,
                 bite_at: None,
+                command: None,
+                image: None,
             },
             parachains: None,
             base_path: None,
@@ -1188,6 +1332,8 @@ mod test {
                 upgrade: None,
                 sync_url: None,
                 bite_at: None,
+                command: None,
+                image: None,
             },
             parachains: Some(vec![
                 ParachainConfig {
@@ -1200,6 +1346,8 @@ mod test {
                     id: None,
                     chain_spec: None,
                     cores: None,
+                    command: None,
+                    image: None,
                 },
                 ParachainConfig {
                     parachain_type: "coretime".to_string(),
@@ -1211,6 +1359,8 @@ mod test {
                     id: None,
                     chain_spec: None,
                     cores: None,
+                    command: None,
+                    image: None,
                 },
                 ParachainConfig {
                     parachain_type: "people".to_string(),
@@ -1222,6 +1372,8 @@ mod test {
                     id: None,
                     chain_spec: None,
                     cores: None,
+                    command: None,
+                    image: None,
                 },
             ]),
             base_path: None,
@@ -1424,6 +1576,8 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: Some(3392),
             chain_spec: Some("/path/to/spec.json".to_string()),
             cores: None,
+            command: None,
+            image: None,
         };
 
         let para = config.to_parachain().unwrap();
@@ -1445,6 +1599,8 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: None,
             chain_spec: Some("/path/to/spec.json".to_string()),
             cores: None,
+            command: None,
+            image: None,
         };
         config.to_parachain();
     }
@@ -1464,6 +1620,8 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: Some(3392),
             chain_spec: None,
             cores: None,
+            command: None,
+            image: None,
         };
         config.to_parachain();
     }
@@ -1483,6 +1641,8 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: Some(3392),
             chain_spec: Some("/path/to/spec.json".to_string()),
             cores: None,
+            command: None,
+            image: None,
         };
         config.to_parachain();
     }
@@ -1504,10 +1664,209 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             cores: 1,
         }];
 
-        let config = generate_network_config(&relaychain, parachains).unwrap();
+        let config =
+            generate_network_config(&relaychain, parachains, &SpawnSetup::default()).unwrap();
         let parachains = config.parachains();
         assert_eq!(parachains.len(), 1);
         let para_config = parachains.first().unwrap();
         assert_eq!(para_config.id(), 3392);
+    }
+
+    fn para_cfg_with_setup(
+        parachain_type: &str,
+        id: Option<u32>,
+        enabled: Option<bool>,
+        command: Option<&str>,
+        image: Option<&str>,
+    ) -> ParachainConfig {
+        ParachainConfig {
+            parachain_type: parachain_type.to_string(),
+            runtime_override: None,
+            upgrade: None,
+            enabled,
+            bite_at: None,
+            rpc_endpoint: Some("wss://example.com".to_string()),
+            id,
+            chain_spec: Some("/tmp/spec.json".to_string()),
+            cores: None,
+            command: command.map(str::to_string),
+            image: image.map(str::to_string),
+        }
+    }
+
+    fn config_with_setup(parachains: Vec<ParachainConfig>) -> ZombieBiteConfig {
+        ZombieBiteConfig {
+            relaychain: RelaychainConfig {
+                network: "polkadot".to_string(),
+                runtime_override: None,
+                upgrade: None,
+                sync_url: None,
+                bite_at: None,
+                command: Some("./bins/polkadot".to_string()),
+                image: Some("docker.io/parity/polkadot:v1.19.0".to_string()),
+            },
+            parachains: Some(parachains),
+            base_path: None,
+            and_spawn: None,
+            with_monitor: None,
+            apply_upgrade: None,
+        }
+    }
+
+    #[test]
+    fn get_spawn_setup_reads_command_and_image() {
+        let config = config_with_setup(vec![para_cfg_with_setup(
+            "asset-hub",
+            None,
+            None,
+            Some("polkadot-parachain-next"),
+            Some("docker.io/parity/polkadot-parachain:v1.19.0"),
+        )]);
+
+        let setup = config.get_spawn_setup();
+
+        assert_eq!(setup.relay_command(), "./bins/polkadot");
+        assert_eq!(
+            setup.relay_image(),
+            Some("docker.io/parity/polkadot:v1.19.0")
+        );
+        assert_eq!(setup.para_command(1000), "polkadot-parachain-next");
+        assert_eq!(
+            setup.para_image(1000),
+            Some("docker.io/parity/polkadot-parachain:v1.19.0")
+        );
+    }
+
+    #[test]
+    fn spawn_setup_falls_back_to_builtin_defaults() {
+        let setup = SpawnSetup::default();
+
+        assert_eq!(setup.relay_command(), "polkadot");
+        assert_eq!(setup.para_command(1000), "polkadot-parachain");
+        assert_eq!(setup.relay_image(), None);
+        assert_eq!(setup.para_image(1000), None);
+    }
+
+    #[test]
+    fn get_spawn_setup_skips_disabled_parachains() {
+        let config = config_with_setup(vec![
+            para_cfg_with_setup("asset-hub", None, Some(false), Some("skipped"), None),
+            para_cfg_with_setup("coretime", None, Some(true), Some("kept"), None),
+        ]);
+
+        let setup = config.get_spawn_setup();
+
+        // asset-hub (1000) is disabled, so it never makes it into the table
+        assert!(!setup.paras.contains_key(&1000));
+        assert_eq!(setup.para_command(1000), "polkadot-parachain");
+        assert_eq!(setup.para_command(1005), "kept");
+    }
+
+    #[test]
+    fn spawn_setup_validate_rejects_bad_values() {
+        let bad_image = SpawnSetup {
+            relay: ChainSpawnSetup {
+                command: None,
+                image: Some("not an image!".to_string()),
+            },
+            paras: Default::default(),
+        };
+        let err = bad_image.validate().unwrap_err().to_string();
+        assert!(err.contains("invalid `image` for relaychain"), "{err}");
+
+        // zombienet's `Command` rejects whitespace, extra args go in the
+        // ZOMBIE_BITE_*_EXTRA_ARGS env vars instead.
+        let bad_command = SpawnSetup {
+            relay: ChainSpawnSetup::default(),
+            paras: [(
+                1000,
+                ChainSpawnSetup {
+                    command: Some("polkadot-parachain --foo".to_string()),
+                    image: None,
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+        let err = bad_command.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("invalid `command` for parachain 1000"),
+            "{err}"
+        );
+
+        let ok = SpawnSetup {
+            relay: ChainSpawnSetup {
+                command: Some("./bins/polkadot".to_string()),
+                image: Some("docker.io/parity/polkadot:v1.19.0".to_string()),
+            },
+            paras: Default::default(),
+        };
+        assert!(ok.validate().is_ok());
+    }
+
+    #[test]
+    fn generated_config_carries_command_and_image() {
+        let setup = SpawnSetup {
+            relay: ChainSpawnSetup {
+                command: Some("./bins/polkadot".to_string()),
+                image: Some("docker.io/parity/polkadot:v1.19.0".to_string()),
+            },
+            paras: [(
+                1000,
+                ChainSpawnSetup {
+                    command: Some("./bins/polkadot-parachain".to_string()),
+                    image: Some("docker.io/parity/polkadot-parachain:v1.19.0".to_string()),
+                },
+            )]
+            .into_iter()
+            .collect(),
+        };
+
+        let config = generate_network_config(
+            &Relaychain::new("kusama"),
+            vec![Parachain::new("asset-hub")],
+            &setup,
+        )
+        .unwrap();
+
+        let toml = config.dump_to_toml().unwrap();
+        assert!(
+            toml.contains(r#"default_command = "./bins/polkadot""#),
+            "{toml}"
+        );
+        assert!(
+            toml.contains(r#"default_image = "docker.io/parity/polkadot:v1.19.0""#),
+            "{toml}"
+        );
+        assert!(
+            toml.contains(r#"default_command = "./bins/polkadot-parachain""#),
+            "{toml}"
+        );
+        assert!(
+            toml.contains(r#"default_image = "docker.io/parity/polkadot-parachain:v1.19.0""#),
+            "{toml}"
+        );
+    }
+
+    #[test]
+    fn example_with_images_toml_is_valid() {
+        let config = ZombieBiteConfig::from_file("./examples/with-images.toml").unwrap();
+        let setup = config.get_spawn_setup();
+        setup.validate().unwrap();
+
+        assert_eq!(setup.relay_command(), "./bins/polkadot");
+        assert_eq!(
+            setup.relay_image(),
+            Some("docker.io/parity/polkadot:v1.19.0")
+        );
+        // asset-hub sets both
+        assert_eq!(setup.para_command(1000), "./bins/polkadot-parachain");
+        assert!(setup.para_image(1000).is_some());
+        // coretime sets only the image
+        assert_eq!(setup.para_command(1005), "polkadot-parachain");
+        assert!(setup.para_image(1005).is_some());
+        // people sets neither
+        assert_eq!(setup.para_command(1004), "polkadot-parachain");
+        assert_eq!(setup.para_image(1004), None);
     }
 }
