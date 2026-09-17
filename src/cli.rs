@@ -9,7 +9,7 @@ use std::{
 use tracing::{trace, warn};
 
 use crate::config::{
-    BiteOptions, CoresOverride, Parachain, Relaychain, Upgrades, ZombieBiteConfig,
+    BiteOptions, CoresOverride, Parachain, Relaychain, SpawnSetup, Upgrades, ZombieBiteConfig,
 };
 
 const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];
@@ -202,6 +202,7 @@ pub struct ResolvedBiteConfig {
     pub base_path: PathBuf,
     pub and_spawn: bool,
     pub apply_upgrade: bool,
+    pub spawn_setup: SpawnSetup,
     pub publish_bootnodes: Option<String>,
     pub opts: BiteOptions,
 }
@@ -374,6 +375,14 @@ pub fn resolve_bite_config(
         false
     };
 
+    // `command` / `image` only come from the config file, there is no cli flag
+    // for them. Validate here so a typo fails now and not after the sync.
+    let spawn_setup = if let Some(ref config) = config_file {
+        config.get_spawn_setup()
+    } else {
+        SpawnSetup::default()
+    };
+    spawn_setup.validate()?;
     // Per-para cores: CLI entries win over the config file's `cores`.
     let mut cores: CoresOverride = CoresOverride::new();
     if let Some(ref config) = config_file {
@@ -420,6 +429,7 @@ pub fn resolve_bite_config(
         base_path: resolved_base_path,
         and_spawn: resolved_and_spawn,
         apply_upgrade: resolved_apply_upgrade,
+        spawn_setup,
         publish_bootnodes: publish_bootnodes.or_else(|| {
             config_file
                 .as_ref()

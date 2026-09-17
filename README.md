@@ -104,6 +104,28 @@ zombie-bite bite -r kusama --rc-upgrade ./kusama_runtime.wasm --and-spawn --appl
 zombie-bite spawn -d /tmp/base_path --apply-upgrade
 ```
 
+#### Set the command / image of the spawned network
+
+The `bite` step writes a zombienet network config into `<base_path>/bite/config.toml`, and that is the file the network is spawned from. By default its nodes run `polkadot` and `polkadot-parachain` resolved from `PATH`, with no image set. Both can be set per chain in the config file:
+
+```toml
+[relaychain]
+network = "polkadot"
+command = "./bins/polkadot"
+image = "docker.io/parity/polkadot:v1.19.0"
+
+[[parachains]]
+type = "asset-hub"
+command = "./bins/polkadot-parachain"
+image = "docker.io/parity/polkadot-parachain:v1.19.0"
+```
+
+They land as `default_command` / `default_image` in the generated `config.toml`, can be set independently, and are validated when the config file is read so a typo fails right away instead of after the whole sync.
+
+- `command` takes effect immediately, including with `zombie-bite spawn`, and is the way to point at a local build instead of relying on `PATH`. It cannot contain whitespace; extra args still go through `ZOMBIE_BITE_RC_EXTRA_ARGS` / `ZOMBIE_BITE_AH_EXTRA_ARGS`.
+- `image` is only honored by providers that use images (docker/k8s). `zombie-bite spawn` uses the native provider, which ignores it, so `image` is a pass-through for feeding the generated `config.toml` to zombienet elsewhere.
+
+There are no cli flags for these, they are config-file only. Neither key affects the `bite` step itself, which always runs the `doppelganger` / `doppelganger-parachain` binaries. See [examples/with-images.toml](./examples/with-images.toml).
 #### Forking a relay that is not a public network
 
 `-r` also takes `custom%<name>%<rpc_endpoint>%<chain_spec_path>`, for a relay zombie-bite has no built-in knowledge of:

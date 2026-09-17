@@ -233,6 +233,7 @@ async fn main() -> Result<(), anyhow::Error> {
                 resolved_config.relaychain,
                 resolved_config.parachains,
                 &database,
+                &resolved_config.spawn_setup,
                 &resolved_config.opts,
             )
             .await
