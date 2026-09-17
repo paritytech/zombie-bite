@@ -1,3 +1,4 @@
+use anyhow::{anyhow, bail};
 use clap::{Parser, Subcommand};
 use std::{
     env,
@@ -7,7 +8,11 @@ use std::{
 };
 use tracing::{trace, warn};
 
-use crate::config::{Parachain, Relaychain, SpawnSetup, Upgrades, ZombieBiteConfig};
+use crate::config::{
+    BiteOptions, CoresOverride, Parachain, Relaychain, Upgrades, ZombieBiteConfig,
+};
+
+const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -26,7 +31,10 @@ pub enum Commands {
         /// The network will be using for bite
         /// If not specified, will use the value from config.
         /// If not in config, defaults to polkadot.
-        #[arg(short = 'r', long = "rc", value_parser = clap::builder::PossibleValuesParser::new(["polkadot", "kusama", "paseo", "westend"]))]
+        /// The network to bite: polkadot, kusama, paseo or westend.
+        /// For a relay that is not a public network use:
+        /// custom%<name>%<rpc_endpoint>%<chain_spec_path>
+        #[arg(short = 'r', long = "rc", verbatim_doc_comment)]
         relay: Option<String>,
         /// If provided we will override the runtime as part of the process of 'bite'
         /// The resulting network will be running with this runtime.
@@ -47,6 +55,22 @@ pub enum Commands {
         /// for every carried upgrade and wait until it enacts.
         #[arg(long, default_value_t = false, verbatim_doc_comment)]
         apply_upgrade: bool,
+        /// Keep the inherited HRMP/DMP state instead of clearing it. Only correct
+        /// when the relay's parachains are exactly the ones being bitten, so the
+        /// two snapshots agree on channel heads.
+        #[arg(long, default_value_t = false, verbatim_doc_comment)]
+        keep_messaging_state: bool,
+        /// Override the cores assigned to a parachain, format: <para_id>=<cores>
+        /// Can be set multiple times, once per para.
+        #[arg(long = "para-cores", verbatim_doc_comment)]
+        para_cores: Vec<String>,
+        /// Advertise this run's own nodes as bootNodes in the published
+        /// chain-specs, so the artifacts are usable by nodes this process did
+        /// not start. Pass a hostname or IP to advertise (a deployment's public
+        /// name); with no value the loopback addresses are published, which only
+        /// works on the same host.
+        #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1", verbatim_doc_comment)]
+        publish_bootnodes: Option<String>,
         /// If provided we will _bite_ the live network at the supplied block hieght
         #[arg(long = "rc-bite-at", verbatim_doc_comment)]
         relay_bite_at: Option<u32>,
@@ -91,6 +115,29 @@ pub enum Commands {
         /// and wait until it enacts.
         #[arg(long, default_value_t = false, verbatim_doc_comment)]
         apply_upgrade: bool,
+        /// Advertise this run's own nodes as bootNodes in the published
+        /// chain-specs, so the artifacts are usable by nodes this process did
+        /// not start. Pass a hostname or IP to advertise (a deployment's public
+        /// name); with no value the loopback addresses are published, which only
+        /// works on the same host.
+        #[arg(long, num_args = 0..=1, default_missing_value = "127.0.0.1", verbatim_doc_comment)]
+        publish_bootnodes: Option<String>,
+        /// Bundle produced by 'pack' to restore into the base path before
+        /// spawning, so a bite from another machine can be spawned here.
+        #[arg(long, verbatim_doc_comment)]
+        bundle: Option<String>,
+    },
+    /// Pack a step's artifacts (specs, snapshots, overrides, manifest) into a single file.
+    Pack {
+        /// Base path holding the artifacts.
+        #[arg(long, short = 'd', verbatim_doc_comment)]
+        base_path: Option<String>,
+        /// Step to pack.
+        #[arg(short = 's', value_parser = clap::builder::PossibleValuesParser::new(["bite", "spawn", "post"]), default_value="bite")]
+        step: String,
+        /// Where to write the bundle. Defaults to '<base_path>/<step>-bundle.tgz'.
+        #[arg(long, short = 'o', verbatim_doc_comment)]
+        out: Option<String>,
     },
     /// [Helper] Generate artifacts to be used by the next step (only 'spawn' and 'post' allowed)
     GenerateArtifacts {
@@ -154,9 +201,10 @@ pub struct ResolvedBiteConfig {
     pub parachains: Vec<Parachain>,
     pub base_path: PathBuf,
     pub and_spawn: bool,
-    pub upgrades: Upgrades,
     pub apply_upgrade: bool,
     pub spawn_setup: SpawnSetup,
+    pub publish_bootnodes: Option<String>,
+    pub opts: BiteOptions,
 }
 
 #[derive(Debug)]
@@ -164,6 +212,7 @@ pub struct ResolvedSpawnConfig {
     pub base_path: PathBuf,
     pub with_monitor: bool,
     pub apply_upgrade: bool,
+    pub publish_bootnodes: Option<String>,
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -179,6 +228,9 @@ pub fn resolve_bite_config(
     relay_upgrade: Option<String>,
     para_upgrade: Vec<String>,
     apply_upgrade: bool,
+    keep_messaging_state: bool,
+    para_cores: Vec<String>,
+    publish_bootnodes: Option<String>,
 ) -> Result<ResolvedBiteConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -197,8 +249,16 @@ pub fn resolve_bite_config(
         "polkadot".to_string()
     };
 
-    let relaychain = if relay_runtime.is_some() || rc_sync_url.is_some() || relay_bite_at.is_some()
-    {
+    let relaychain = if relay_network.starts_with("custom%") {
+        resolve_custom_relaychain(&relay_network, relay_runtime.clone(), relay_bite_at)?
+    } else if !KNOWN_RELAYS.contains(&relay_network.as_str()) {
+        // Anything else is a typo, not a chain to bite: a custom relay has to
+        // come with its endpoint and chain-spec.
+        bail!(
+            "unknown relay '{relay_network}'; use one of {} or custom%<name>%<rpc_endpoint>%<chain_spec_path>",
+            KNOWN_RELAYS.join(", ")
+        );
+    } else if relay_runtime.is_some() || rc_sync_url.is_some() || relay_bite_at.is_some() {
         // CLI args provided, use them
         Relaychain::new_with_values(&relay_network, relay_runtime, rc_sync_url, relay_bite_at)
     } else if let Some(ref config) = config_file {
@@ -282,20 +342,19 @@ pub fn resolve_bite_config(
     };
 
     // Resolve upgrades (CLI overrides config file)
+    let mut para_upgrades = std::collections::HashMap::new();
+    for entry in &para_upgrade {
+        let (id, path) = entry.split_once('=').ok_or_else(|| {
+            anyhow!("--para-upgrade must be <para_id>=<wasm_path>, got '{entry}'")
+        })?;
+        let id: u32 = id
+            .parse()
+            .map_err(|_| anyhow!("invalid para_id '{id}' in --para-upgrade"))?;
+        para_upgrades.insert(id, path.to_string());
+    }
     let mut upgrades = Upgrades {
         relay: relay_upgrade,
-        paras: para_upgrade
-            .iter()
-            .map(|entry| {
-                let (id, path) = entry.split_once('=').unwrap_or_else(|| {
-                    panic!("--para-upgrade format must be <para_id>=<wasm_path>, got: {entry}")
-                });
-                let id: u32 = id
-                    .parse()
-                    .unwrap_or_else(|_| panic!("Invalid para_id '{id}' in --para-upgrade"));
-                (id, path.to_string())
-            })
-            .collect(),
+        paras: para_upgrades,
     };
     if let Some(ref config) = config_file {
         if upgrades.relay.is_none() {
@@ -324,15 +383,63 @@ pub fn resolve_bite_config(
         SpawnSetup::default()
     };
     spawn_setup.validate()?;
+    // Per-para cores: CLI entries win over the config file's `cores`.
+    let mut cores: CoresOverride = CoresOverride::new();
+    if let Some(ref config) = config_file {
+        for para_cfg in config.parachains.as_deref().unwrap_or_default() {
+            if let (Some(c), Some(para)) = (para_cfg.cores, para_cfg.to_parachain()) {
+                cores.insert(para.id(), c);
+            }
+        }
+    }
+    for entry in &para_cores {
+        let (id, c) = entry
+            .split_once('=')
+            .ok_or_else(|| anyhow!("--para-cores must be <para_id>=<cores>, got '{entry}'"))?;
+        let id: u32 = id
+            .parse()
+            .map_err(|_| anyhow!("invalid para_id '{id}' in --para-cores"))?;
+        let c: u32 = c
+            .parse()
+            .map_err(|_| anyhow!("invalid cores '{c}' in --para-cores"))?;
+        if c == 0 {
+            bail!("--para-cores {id}=0: a parachain with no cores can't have blocks backed");
+        }
+        cores.insert(id, c);
+    }
+    // A core count for a para that is not part of the bite is a typo, not a
+    // silently ignorable no-op.
+    for id in cores.keys() {
+        if !resolved_parachains.iter().any(|para| para.id() == *id) {
+            bail!("--para-cores/config sets cores for para {id}, which is not part of this bite");
+        }
+    }
+
+    let resolved_keep_messaging = if keep_messaging_state {
+        true
+    } else if let Some(ref config) = config_file {
+        config.keep_messaging_state.unwrap_or(false)
+    } else {
+        false
+    };
 
     Ok(ResolvedBiteConfig {
         relaychain,
         parachains: resolved_parachains,
         base_path: resolved_base_path,
         and_spawn: resolved_and_spawn,
-        upgrades,
         apply_upgrade: resolved_apply_upgrade,
         spawn_setup,
+        publish_bootnodes: publish_bootnodes.or_else(|| {
+            config_file
+                .as_ref()
+                .and_then(|c| c.publish_bootnodes.clone())
+        }),
+        opts: BiteOptions {
+            upgrades,
+            cores,
+            keep_messaging_state: resolved_keep_messaging,
+        },
     })
 }
 
@@ -341,6 +448,7 @@ pub fn resolve_spawn_config(
     base_path: Option<String>,
     with_monitor: bool,
     apply_upgrade: bool,
+    publish_bootnodes: Option<String>,
 ) -> Result<ResolvedSpawnConfig, anyhow::Error> {
     // Load config file if provided
     let config_file = if let Some(path) = config_path {
@@ -377,7 +485,35 @@ pub fn resolve_spawn_config(
         base_path: resolved_base_path,
         with_monitor: resolved_with_monitor,
         apply_upgrade: resolved_apply_upgrade,
+        publish_bootnodes: publish_bootnodes.or_else(|| {
+            config_file
+                .as_ref()
+                .and_then(|c| c.publish_bootnodes.clone())
+        }),
     })
+}
+
+/// custom%<name>%<rpc_endpoint>%<chain_spec_path>
+fn resolve_custom_relaychain(
+    s: &str,
+    maybe_override: Option<String>,
+    maybe_bite_at: Option<u32>,
+) -> Result<Relaychain, anyhow::Error> {
+    let parts: Vec<&str> = s.splitn(4, '%').collect();
+    if parts.len() != 4 {
+        bail!("custom relay must be custom%<name>%<rpc_endpoint>%<chain_spec_path>, got '{s}'");
+    }
+    let (name, rpc, chain_spec) = (parts[1], parts[2], parts[3]);
+    if name.is_empty() || rpc.is_empty() || chain_spec.is_empty() {
+        bail!("custom relay needs a name, an rpc endpoint and a chain-spec path, got '{s}'");
+    }
+    Ok(Relaychain::new_custom(
+        name,
+        chain_spec,
+        rpc,
+        maybe_override,
+        maybe_bite_at,
+    ))
 }
 
 fn resolve_custom_parachain(s: &str) -> Parachain {
@@ -471,5 +607,46 @@ mod test {
     fn custom_para_cores_parse_err() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%abc";
         let _para = resolve_custom_parachain(s);
+    }
+    #[test]
+    fn custom_relay_works() {
+        let rc = resolve_custom_relaychain(
+            "custom%previewnet%wss://previewnet.example.com%/path/to/previewnet.json",
+            None,
+            Some(42),
+        )
+        .unwrap();
+
+        assert_eq!(rc.as_chain_string(), "previewnet");
+        assert_eq!(rc.chain_spec(), Some("/path/to/previewnet.json"));
+        // a custom relay is passed to the node as a spec path, not a name
+        assert_eq!(rc.chain_arg(), "/path/to/previewnet.json");
+        assert_eq!(rc.rpc_endpoint(), "wss://previewnet.example.com");
+        assert_eq!(rc.sync_endpoint(), "wss://previewnet.example.com");
+        assert_eq!(rc.at_block(), Some(42));
+        assert!(rc.is_custom());
+    }
+
+    #[test]
+    fn custom_relay_needs_every_part() {
+        for bad in [
+            "custom%previewnet%wss://previewnet.example.com",
+            "custom%previewnet%%/path/to/spec.json",
+            "custom%%wss://x%/path/to/spec.json",
+        ] {
+            assert!(
+                resolve_custom_relaychain(bad, None, None).is_err(),
+                "should reject '{bad}'"
+            );
+        }
+    }
+
+    #[test]
+    fn unknown_relay_name_keeps_its_name() {
+        // helper subcommands only get the name back as a string, and the
+        // artifacts are named after it
+        let rc = Relaychain::new("previewnet");
+        assert_eq!(rc.as_chain_string(), "previewnet");
+        assert!(rc.is_custom());
     }
 }

@@ -12,7 +12,8 @@
 
 You need these binaries available in your `PATH`:
 
-- [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers)
+- [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers) — v0.2.3 or newer. The bite syncs state without range proofs (a chain whose staking lives on Asset Hub cannot be synced with them: sync freezes silently at ~37%); older builds ignore that setting and freeze on such chains.
+- `polkadot` and `polkadot-parachain` for the spawned network — polkadot v1.22.1 or newer: the spawn relies on `ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` ([polkadot-sdk#12247](https://github.com/paritytech/polkadot-sdk/pull/12247)); on older binaries the fork produces blocks but never finalizes.
 
 ### Logical steps: Bite, Spawn, Post
 
@@ -125,6 +126,59 @@ They land as `default_command` / `default_image` in the generated `config.toml`,
 - `image` is only honored by providers that use images (docker/k8s). `zombie-bite spawn` uses the native provider, which ignores it, so `image` is a pass-through for feeding the generated `config.toml` to zombienet elsewhere.
 
 There are no cli flags for these, they are config-file only. Neither key affects the `bite` step itself, which always runs the `doppelganger` / `doppelganger-parachain` binaries. See [examples/with-images.toml](./examples/with-images.toml).
+#### Forking a relay that is not a public network
+
+`-r` also takes `custom%<name>%<rpc_endpoint>%<chain_spec_path>`, for a relay zombie-bite has no built-in knowledge of:
+
+```sh
+zombie-bite bite -d /tmp/base_path \
+  -r custom%previewnet%wss://previewnet.example.com%/path/to/previewnet.json \
+  -p custom%2000%wss://para.example.com%/path/to/para.json
+```
+
+The name is what the artifacts are named after, the endpoint is what the bite reads state and metadata from, and the chain-spec is what the node is started with. There is no built-in host config for such a relay, so the endpoint has to be reachable — `Configuration::ActiveConfig` is read from it.
+
+A relay name that is not one of `polkadot`, `kusama`, `paseo` or `westend` is treated as a custom relay rather than silently falling back to polkadot.
+
+#### Cores and messaging state
+
+- `--para-cores <para_id>=<cores>` overrides how many cores a parachain gets (defaults mirror the live networks, e.g. asset-hub takes 3 for elastic scaling). The relay's validator count follows the total.
+- `--keep-messaging-state` keeps the inherited HRMP/DMP state instead of clearing it. Only correct when the relay's parachains are exactly the ones being bitten, so both snapshots agree on channel heads; on a shared relay the mismatch makes cumulus panic with `HRMP head mismatch`.
+
+#### Overrides are checked against the runtime
+
+Storage keys are derived from pallet and item names, and every value is decoded against its real on-chain type and required to re-encode byte-identically, so a renamed item or changed type fails the bite instead of silently landing as something else. Items the runtime does not have are skipped — except ones you asked for explicitly (a carried upgrade, a wasm override, `ZOMBIE_SUDO`), which are errors. `HostConfiguration` is patched from the live value (only `num_cores` changes) rather than replaced, so executor params, async backing and `max_pov_size` of the bitten chain are preserved.
+
+Metadata and the live values are read at the block being bitten (`--rc-bite-at` / a para's `bite_at`), so they match the state being imported. Parachains use a default public endpoint when no `rpc_endpoint` is configured; if it can't be reached, the bite still runs with a warning and those overrides go unverified. Custom parachains are only verified when their config supplies an `rpc_endpoint`.
+
+#### One artifact, restored elsewhere
+
+`pack` puts everything a spawn needs into a single file — chain-specs, db snapshots, `config.toml`, the overrides that were applied, `manifest.json`, `ready.json` and any carried upgrade blob:
+
+```sh
+zombie-bite pack -d /tmp/base_path -s bite            # -> /tmp/base_path/bite-bundle.tgz
+zombie-bite spawn -d /other/path --bundle bite-bundle.tgz
+```
+
+`spawn` re-points the spec and snapshot paths at wherever the bundle was unpacked, so the artifacts do not have to land in the directory they were produced in.
+
+#### Publishing bootnodes
+
+A published chain-spec ships with `bootNodes: []` — that is what keeps a fork from dialing the network it was forked from, but it also means a node this process did not start has no way to find the fork. `--publish-bootnodes` fills the list with the fork's own nodes, in the artifacts generated at teardown (the `bite` bundle is left untouched):
+
+```sh
+# same host: publishes the loopback addresses
+zombie-bite spawn -d /tmp/base_path --publish-bootnodes
+
+# a deployment: advertise its public name (or IP) instead
+zombie-bite spawn -d /tmp/base_path --publish-bootnodes fork.example.com
+```
+
+Only the address host is rewritten — port, transport and peer id stay as spawned. Specs are matched by their own `para_id` rather than by file name, since a fork carries the source chain's spec id.
+
+#### Bundle manifest
+
+A bite writes a `manifest.json` next to `ready.json` describing the bite bundle: per chain the bite block, source RPC, spec and snapshot file names with sizes, and any carried upgrade.
 
 #### Spawn
 

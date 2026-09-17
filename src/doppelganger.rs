@@ -21,7 +21,7 @@ use flate2::Compression;
 use tar::Builder;
 
 use tracing::debug;
-use tracing::{info, trace};
+use tracing::{info, trace, warn};
 use zombienet_configuration::shared::types::AssetLocation;
 use zombienet_configuration::NetworkConfigBuilder;
 use zombienet_orchestrator::network::Network;
@@ -39,8 +39,10 @@ use crate::utils::{
 
 use crate::config::{
     get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, SpawnSetup, Step,
-    Upgrades,
+    Upgrades, BiteOptions
 };
+use crate::manifest::{self, ChainEntry, Manifest};
+use crate::metadata::ChainMetadata;
 use crate::overrides::{generate_default_overrides_for_para, generate_default_overrides_for_rc};
 use crate::sync::{sync_para, sync_relay_only};
 
@@ -59,8 +61,13 @@ struct ChainArtifact {
     chain: String,
     spec_path: String,
     snap_path: String,
+    /// Size of the snapshot, measured when it is written: later steps can move
+    /// it (ZOMBIE_BITE_CI_PATH) and then it can no longer be stat'ed here.
+    snap_bytes: Option<u64>,
     override_wasm: Option<String>,
     para_id: Option<u32>,
+    /// Cores assigned to this parachain (0 for the relay).
+    cores: u32,
 }
 
 pub async fn doppelganger_inner(
@@ -70,6 +77,7 @@ pub async fn doppelganger_inner(
     database: &str,
     upgrades: &Upgrades,
     spawn_setup: &SpawnSetup,
+    opts: &BiteOptions,
 ) -> Result<(), anyhow::Error> {
     // Star the node and wait until finish (with temp dir managed by us)
     info!(
@@ -98,13 +106,31 @@ pub async fn doppelganger_inner(
     // Parachain sync
     let mut syncs = vec![];
     for para in &paras_to {
+        let para_meta = match para
+            .rpc_endpoint()
+            .map(str::to_string)
+            .or_else(|| para.default_rpc_endpoint(&relay_chain))
+        {
+            Some(url) => {
+                ChainMetadata::fetch(&format!("para {}", para.id()), &url, para.at_block()).await
+            }
+            None => {
+                warn!(
+                    "para {}: no 'rpc_endpoint' configured, overrides will not be verified against the runtime",
+                    para.id()
+                );
+                None
+            }
+        };
         let para_default_overrides_path = generate_default_overrides_for_para(
             &base_dir_str,
             para,
             &relay_chain,
-            upgrades.paras.get(&para.id()).map(String::as_str),
+            opts.upgrades.paras.get(&para.id()).map(String::as_str),
+            para_meta.as_ref(),
+            opts.keep_messaging_state,
         )
-        .await;
+        .await?;
         let info_path = format!("{base_dir_str}/para-{}.txt", para.id());
 
         let maybe_target_header_path = if let Some(at_block) = para.at_block() {
@@ -192,6 +218,7 @@ pub async fn doppelganger_inner(
         let snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain_name);
         trace!("snap_path: {snap_path}");
         generate_snap(&sync_db_path, &snap_path).await.unwrap();
+        let snap_bytes = fs::metadata(&snap_path).await.ok().map(|m| m.len());
 
         let para_head_str = read_to_string(&sync_head_path)
             .unwrap_or_else(|_| panic!("read para_head ({sync_head_path}) file should works."));
@@ -222,22 +249,33 @@ pub async fn doppelganger_inner(
             },
             spec_path: chain_spec_path,
             snap_path,
+            snap_bytes,
             override_wasm: para.wasm_overrides().map(str::to_string),
             para_id: Some(para.id()),
+            cores: get_assigned_cores(&relay_chain, para, &opts.cores),
         });
     }
 
     let req_cores: u32 = paras_to.iter().fold(0u32, |acc, para| {
-        acc + get_assigned_cores(&relay_chain, para)
+        acc + get_assigned_cores(&relay_chain, para, &opts.cores)
     });
+    let rc_meta = ChainMetadata::fetch(
+        &relay_chain.as_chain_string(),
+        &relay_chain.rpc_endpoint(),
+        relay_chain.at_block(),
+    )
+    .await;
     let rc_default_overrides_path = generate_default_overrides_for_rc(
         &base_dir_str,
         &relay_chain,
         &paras_to,
         req_cores,
-        upgrades.relay.as_deref(),
+        opts.upgrades.relay.as_deref(),
+        rc_meta.as_ref(),
+        &opts.cores,
+        opts.keep_messaging_state,
     )
-    .await;
+    .await?;
     let rc_info_path = format!("{base_dir_str}/rc_info.txt");
     // RELAYCHAIN sync
 
@@ -256,7 +294,7 @@ pub async fn doppelganger_inner(
     let (sync_node, sync_db_path, sync_chain) = sync_relay_only(
         ns.clone(),
         "doppelganger",
-        relay_chain.as_chain_string(),
+        &relay_chain,
         para_heads_env,
         rc_default_overrides_path,
         &rc_info_path,
@@ -277,18 +315,20 @@ pub async fn doppelganger_inner(
         ns.clone(),
         &r_chain_spec_path,
         &context_relay.doppelganger_cmd(),
-        &sync_chain,
+        &relay_chain.chain_arg(),
     )
     .await
     .unwrap();
 
     // remove `parachains` db
+    // The node keeps its db under the chain-spec's own id, which is not always
+    // the name we use for the artifacts.
     let sync_chain_in_path = if sync_chain == "kusama" {
-        "ksmcc3"
+        "ksmcc3".to_string()
     } else if sync_chain == "westend" {
-        "westend2"
+        "westend2".to_string()
     } else {
-        sync_chain.as_str()
+        spec_chain_id(&r_chain_spec_path).await?
     };
 
     let parachains_path = if database == "rocksdb" {
@@ -305,21 +345,30 @@ pub async fn doppelganger_inner(
     // generate the data.tgz to use as snapshot
     let r_snap_path = format!("{}/{}-snap.tgz", base_dir_str, sync_chain);
     generate_snap(&sync_db_path, &r_snap_path).await.unwrap();
+    let r_snap_bytes = fs::metadata(&r_snap_path).await.ok().map(|m| m.len());
 
     let relay_artifacts = ChainArtifact {
         // cmd: context_relay.doppelganger_cmd(),
         cmd: spawn_setup.relay_command(),
         image: spawn_setup.relay_image().map(str::to_string),
+        // The polkadot binary must honour
+        // ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION (sdk#12247,
+        // v1.22.1+): without it the dispute coordinator scans ancestor headers
+        // a warp-synced bite does not have, never initializes, and caps
+        // finality at the bite block forever while blocks keep being produced.
+        cmd: context_relay.cmd(),
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
+        snap_bytes: r_snap_bytes,
         override_wasm: relay_chain.wasm_overrides().map(str::to_string),
         para_id: None,
+        cores: 0,
     };
 
     let config = generate_config(
-        relay_artifacts,
-        para_artifacts,
+        relay_artifacts.clone(),
+        para_artifacts.clone(),
         Some(global_base_dir.clone()),
         database,
         req_cores,
@@ -375,14 +424,14 @@ pub async fn doppelganger_inner(
     // Carried upgrade blobs live next to ready.json (outside the step dirs, so
     // they survive clean-up) and must match the seeded System::AuthorizedUpgrade.
     let global_base_dir_str = global_base_dir.to_string_lossy();
-    if let Some(upgrade_wasm) = &upgrades.relay {
+    if let Some(upgrade_wasm) = &opts.upgrades.relay {
         let blob_name = format!("{}-upgrade.wasm", relay_chain.as_chain_string());
         let (blob, hash) = copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
         ready_content["rc_upgrade_wasm"] = json!(blob);
         ready_content["rc_upgrade_hash"] = json!(hash);
     }
     for para in &paras_to {
-        if let Some(upgrade_wasm) = upgrades.paras.get(&para.id()) {
+        if let Some(upgrade_wasm) = opts.upgrades.paras.get(&para.id()) {
             let blob_name = format!(
                 "{}-upgrade.wasm",
                 para.as_chain_string(&relay_chain.as_chain_string())
@@ -430,9 +479,91 @@ pub async fn doppelganger_inner(
     )
     .await;
 
+    let manifest = build_manifest(
+        &relay_chain,
+        &paras_to,
+        &ready_content,
+        &relay_artifacts,
+        &para_artifacts,
+    );
+    manifest.write(&global_base_dir).await?;
+
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
 
     Ok(())
+}
+
+/// `id` of a chain-spec, which is the directory the node stores its db under.
+async fn spec_chain_id(spec_path: &str) -> Result<String, anyhow::Error> {
+    let content = fs::read_to_string(spec_path)
+        .await
+        .map_err(|e| anyhow!("can't read chain-spec {spec_path}: {e}"))?;
+    let spec: serde_json::Value = serde_json::from_str(&content)
+        .map_err(|e| anyhow!("chain-spec {spec_path} is not valid json: {e}"))?;
+    spec["id"]
+        .as_str()
+        .map(str::to_string)
+        .ok_or_else(|| anyhow!("chain-spec {spec_path} has no 'id'"))
+}
+
+fn build_manifest(
+    relay_chain: &Relaychain,
+    paras_to: &[Parachain],
+    ready: &serde_json::Value,
+    relay_artifacts: &ChainArtifact,
+    para_artifacts: &[ChainArtifact],
+) -> Manifest {
+    let file_name = |path: &str| {
+        Path::new(path)
+            .file_name()
+            .map(|n| n.to_string_lossy().to_string())
+    };
+
+    let relay = ChainEntry {
+        chain: relay_chain.as_chain_string(),
+        para_id: None,
+        bite_block: ready["rc_start_block"].as_u64(),
+        source_rpc: ready["rc_source_rpc"].as_str().map(str::to_string),
+        spec_file: file_name(&relay_artifacts.spec_path),
+        snapshot_file: file_name(&relay_artifacts.snap_path),
+        snapshot_bytes: relay_artifacts.snap_bytes,
+        upgrade_file: ready["rc_upgrade_wasm"].as_str().map(str::to_string),
+        upgrade_hash: ready["rc_upgrade_hash"].as_str().map(str::to_string),
+    };
+
+    // para_artifacts is built in paras_to order, so zip keeps them aligned.
+    let parachains = paras_to
+        .iter()
+        .zip(para_artifacts)
+        .map(|(para, artifact)| {
+            let id = para.id();
+            ChainEntry {
+                chain: para.as_chain_string(&relay_chain.as_chain_string()),
+                para_id: Some(id),
+                bite_block: ready[format!("para_{id}_start_block")].as_u64(),
+                source_rpc: ready[format!("para_{id}_source_rpc")]
+                    .as_str()
+                    .map(str::to_string),
+                spec_file: file_name(&artifact.spec_path),
+                snapshot_file: file_name(&artifact.snap_path),
+                snapshot_bytes: artifact.snap_bytes,
+                upgrade_file: ready[format!("para_{id}_upgrade_wasm")]
+                    .as_str()
+                    .map(str::to_string),
+                upgrade_hash: ready[format!("para_{id}_upgrade_hash")]
+                    .as_str()
+                    .map(str::to_string),
+            }
+        })
+        .collect();
+
+    Manifest {
+        version: manifest::VERSION,
+        bundle: Step::Bite.dir(),
+        created_at: manifest::now_unix(),
+        relay,
+        parachains,
+    }
 }
 
 async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
@@ -597,6 +728,12 @@ pub async fn clean_up_dir_for_step(
 
     let mut needed_files: Vec<String> = vec!["config.toml".to_string(), rc_spec.clone()];
 
+    // The overrides that were applied are part of the bundle: without them a
+    // restored bite cannot show what was changed in the state it carries.
+    if step == Step::Bite {
+        needed_files.push("rc_overrides.json".to_string());
+    }
+
     // Add parachain files dynamically
     for para in paras {
         let para_chain_name = para.as_chain_string(&rc.as_chain_string());
@@ -604,6 +741,9 @@ pub async fn clean_up_dir_for_step(
         let para_snap = format!("{}-snap.tgz", para_chain_name);
         needed_files.push(para_spec);
         needed_files.push(para_snap);
+        if step == Step::Bite {
+            needed_files.push(format!("{}_overrides.json", para.id()));
+        }
     }
 
     if step == Step::Bite {
@@ -611,6 +751,20 @@ pub async fn clean_up_dir_for_step(
     } else {
         needed_files.push(alice_snap);
     }
+
+    // Overrides are only there when this step generated them; a missing
+    // spec or snapshot below is still a hard error.
+    let mut present = vec![];
+    for file in needed_files {
+        if file.ends_with("_overrides.json")
+            && !fs::try_exists(format!("{debug_path}/{file}")).await?
+        {
+            warn!("{file} not found, it will not be part of the bundle");
+            continue;
+        }
+        present.push(file);
+    }
+    let needed_files = present;
 
     for file in &needed_files {
         let from = format!("{debug_path}/{file}");
@@ -813,7 +967,9 @@ async fn generate_config(
                 }
             }
 
-            if para.chain.contains("asset-hub") {
+            // Elastic scaling (more than one core) requires slot-based
+            // authoring, whatever the parachain is called.
+            if para.cores > 1 {
                 para_default_args.push("--authoring=slot-based".into());
             }
 
@@ -1191,8 +1347,10 @@ mod test {
             chain: "polkadot".into(),
             spec_path: relay_spec_path.into(),
             snap_path: relay_snap_path.into(),
+            snap_bytes: None,
             override_wasm: None,
             para_id: None,
+            cores: 0,
         };
         let ah = ChainArtifact {
             cmd: "doppelganger-parachain".into(),
@@ -1200,8 +1358,10 @@ mod test {
             chain: "ah-polkadot".into(),
             spec_path: ah_spec_path.into(),
             snap_path: ah_snap_path.into(),
+            snap_bytes: None,
             override_wasm: None,
             para_id: Some(1000),
+            cores: 3,
         };
 
         let network_config = generate_config(relay, vec![ah], None, "rocksdb", 3)

@@ -1,0 +1,60 @@
+[settings]
+timeout = 3600
+node_spawn_timeout = 600
+
+[relaychain]
+chain = "paseo"
+default_command = "doppelganger"
+default_db_snapshot  = "/tmp/ci/bite/paseo-snap.tgz"
+default_args = [
+    "-l=babe=trace,grandpa=info,runtime=trace,consensus::common=trace,parachain=debug,parachain::gossip-support=info",
+    "--discover-local",
+    "--allow-private-ip",
+    "--no-hardware-benchmarks",
+]
+chain_spec_path  = "/tmp/ci/bite/paseo-spec.json"
+
+[[relaychain.nodes]]
+name = "alice"
+db_snapshot = "/tmp/ci/spawn/alice-paseo-snap.tgz"
+validator = true
+invulnerable = true
+bootnode = false
+balance = 2000000000000
+rpc_port = 42579
+
+[[relaychain.nodes]]
+name = "bob"
+db_snapshot = "/tmp/ci/spawn/bob-paseo-snap.tgz"
+validator = true
+invulnerable = true
+bootnode = false
+balance = 2000000000000
+
+[[parachains]]
+id = 1000
+chain = "asset-hub-paseo"
+add_to_genesis = true
+balance = 2000000000000
+default_command = "doppelganger-parachain"
+default_db_snapshot  = "/tmp/ci/bite/asset-hub-paseo-snap.tgz"
+chain_spec_path  = "/tmp/ci/bite/asset-hub-paseo-spec.json"
+cumulus_based = true
+evm_based = false
+
+[[parachains.collators]]
+name = "collator"
+db_snapshot = "/tmp/ci/spawn/asset-hub-paseo-snap.tgz"
+args = [
+    "--relay-chain-rpc-urls=ws://127.0.0.1:42579",
+    "-l=aura=debug,runtime=debug,cumulus-consensus=trace,consensus::common=trace,parachain::collation-generation=trace,parachain::collator-protocol=trace,parachain=debug,xcm=trace",
+    "--force-authoring",
+    "--discover-local",
+    "--allow-private-ip",
+    "--no-hardware-benchmarks",
+]
+validator = true
+invulnerable = true
+bootnode = false
+balance = 2000000000000
+rpc_port = 35881

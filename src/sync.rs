@@ -23,7 +23,7 @@ const PASEO_ASSET_HUB_SPEC_URL: &str =
 pub async fn sync_relay_only(
     ns: DynNamespace,
     cmd: impl AsRef<str>,
-    chain: impl AsRef<str>,
+    relaychain: &Relaychain,
     para_heads_env: Vec<(String, String)>,
     overrides_path: PathBuf,
     info_path: impl AsRef<str>,
@@ -50,19 +50,28 @@ pub async fn sync_relay_only(
     let rc_overrides_path = overrides_path.to_string_lossy().to_string();
     env.push(("ZOMBIE_RC_OVERRIDES_PATH".to_string(), rc_overrides_path));
     env.push(("RUST_LOG".into(), "doppelganger=debug".into()));
+    // Ask for state without a range proof. A chain whose staking lives on
+    // Asset Hub cannot be synced with proofs at all: one storage map turns the
+    // responder's 2 MiB value budget into a >15 MiB proof, the cursor stops,
+    // and peers ban the node for re-requesting the same range - sync freezes
+    // silently at ~37%. Safe for a bite: the state is forked and its authority
+    // set rewritten, so a proof of what is about to be overwritten buys nothing.
+    env.push(("ZOMBIE_WARP_SKIP_PROOF".into(), "1".into()));
     env.push(("ZOMBIE_INFO_PATH".into(), info_path.as_ref().into()));
-    env.push(("ZOMBIE_CHAIN".into(), chain.as_ref().into()));
+    // A custom relay is passed as a chain-spec path; the public networks are
+    // known to the node by name.
+    let chain = relaychain.chain_arg();
+    let chain = chain.as_str();
+    env.push(("ZOMBIE_CHAIN".into(), chain.into()));
 
-    // get the epoch duration from the chain config
-    let rc = Relaychain::new(chain.as_ref());
     env.push((
         "ZOMBIE_RC_EPOCH_DURATION".into(),
-        rc.epoch_duration().to_string(),
+        relaychain.epoch_duration().to_string(),
     ));
 
     // if we are sync westend, let doppelganger know to bypass
     // justification checks
-    if chain.as_ref() == "westend" {
+    if chain == "westend" {
         env.push(("ZOMBIE_IS_WESTEND".into(), "1".into()));
     }
 
@@ -72,7 +81,7 @@ pub async fn sync_relay_only(
     let opts = SpawnNodeOptions::new("sync-node", cmd.as_ref())
         .args(vec![
             "--chain",
-            chain.as_ref(),
+            chain,
             "--sync",
             "warp",
             "-d",
@@ -98,9 +107,9 @@ pub async fn sync_relay_only(
     wait_ws_ready(&metrics_url).await.unwrap();
     let url = reqwest::Url::try_from(metrics_url.as_str()).unwrap();
     wait_sync(url).await.unwrap();
-    info!("✅ Synced (chain: {})", chain.as_ref());
+    info!("✅ Synced (chain: {})", chain);
     // we should just paused
-    Ok((sync_node, sync_db_path, chain.as_ref().to_string()))
+    Ok((sync_node, sync_db_path, relaychain.as_chain_string()))
 }
 
 #[allow(clippy::too_many_arguments)]
@@ -145,6 +154,9 @@ pub async fn sync_para(
     env.push(("ZOMBIE_PARA_OVERRIDES_PATH", &para_overrides_path));
     env.push(("ZOMBIE_PARA_HEAD_PATH", &para_head_path));
     env.push(("RUST_LOG", "doppelganger=debug"));
+    // See sync_relay_only: without this, chains with large flat storage maps
+    // freeze silently mid state-sync.
+    env.push(("ZOMBIE_WARP_SKIP_PROOF", "1"));
     env.push(("ZOMBIE_INFO_PATH", info_path.as_ref()));
     env.push(("ZOMBIE_PARA_ID", &para_id_str));
 
