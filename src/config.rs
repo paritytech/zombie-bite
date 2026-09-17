@@ -255,7 +255,6 @@ impl SpawnSetup {
     }
 }
 
-pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain) -> u32 {
 /// Per-parachain core counts from configuration, keyed by para id. Overrides
 /// the built-in defaults below, which mirror the live networks.
 pub type CoresOverride = std::collections::HashMap<u32, u32>;
@@ -1846,6 +1845,8 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             and_spawn: None,
             with_monitor: None,
             apply_upgrade: None,
+            keep_messaging_state: None,
+            publish_bootnodes: None,
         }
     }
 
@@ -2004,6 +2005,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
         // people sets neither
         assert_eq!(setup.para_command(1004), "polkadot-parachain");
         assert_eq!(setup.para_image(1004), None);
+    }
     #[test]
     fn sync_url_overrides_the_public_endpoint() {
         let default = Relaychain::new("kusama");

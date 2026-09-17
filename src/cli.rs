@@ -9,7 +9,7 @@ use std::{
 use tracing::{trace, warn};
 
 use crate::config::{
-    BiteOptions, CoresOverride, Parachain, Relaychain, Upgrades, ZombieBiteConfig,
+    BiteOptions, CoresOverride, Parachain, Relaychain, SpawnSetup, Upgrades, ZombieBiteConfig,
 };
 
 const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];

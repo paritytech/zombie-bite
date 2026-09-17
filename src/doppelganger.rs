@@ -38,8 +38,8 @@ use crate::utils::{
 };
 
 use crate::config::{
-    get_assigned_cores, get_state_pruning_config, Context, Parachain, Relaychain, SpawnSetup, Step,
-    Upgrades, BiteOptions
+    get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain,
+    SpawnSetup, Step,
 };
 use crate::manifest::{self, ChainEntry, Manifest};
 use crate::metadata::ChainMetadata;
@@ -75,7 +75,6 @@ pub async fn doppelganger_inner(
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,
     database: &str,
-    upgrades: &Upgrades,
     spawn_setup: &SpawnSetup,
     opts: &BiteOptions,
 ) -> Result<(), anyhow::Error> {
@@ -348,15 +347,13 @@ pub async fn doppelganger_inner(
     let r_snap_bytes = fs::metadata(&r_snap_path).await.ok().map(|m| m.len());
 
     let relay_artifacts = ChainArtifact {
-        // cmd: context_relay.doppelganger_cmd(),
-        cmd: spawn_setup.relay_command(),
-        image: spawn_setup.relay_image().map(str::to_string),
         // The polkadot binary must honour
         // ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION (sdk#12247,
         // v1.22.1+): without it the dispute coordinator scans ancestor headers
         // a warp-synced bite does not have, never initializes, and caps
         // finality at the bite block forever while blocks keep being produced.
-        cmd: context_relay.cmd(),
+        cmd: spawn_setup.relay_command(),
+        image: spawn_setup.relay_image().map(str::to_string),
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
