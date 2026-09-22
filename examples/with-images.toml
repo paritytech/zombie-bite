@@ -1,0 +1,35 @@
+# Zombie Bite Configuration - Custom command / image
+# `command` and `image` are written as `default_command` / `default_image` into
+# the generated `<base_path>/bite/config.toml`, the file the network is spawned
+# from. They do not affect the `bite` step, which always uses the
+# `doppelganger` / `doppelganger-parachain` binaries.
+
+base_path = "/tmp/polkadot-bite"
+
+[relaychain]
+network = "polkadot"
+# Binary the relaychain nodes of the spawned network run.
+# Defaults to `polkadot`. No whitespace allowed, extra args go in
+# ZOMBIE_BITE_RC_EXTRA_ARGS.
+command = "./bins/polkadot"
+# Only honored by providers that use images (docker/k8s), the native provider
+# used by `zombie-bite spawn` ignores it.
+image = "docker.io/parity/polkadot:v1.19.0"
+
+[[parachains]]
+type = "asset-hub"
+enabled = true
+command = "./bins/polkadot-parachain"
+image = "docker.io/parity/polkadot-parachain:v1.19.0"
+
+# Both keys are optional and independent: this one sets only the image and
+# keeps the built-in `polkadot-parachain` command.
+[[parachains]]
+type = "coretime"
+enabled = true
+image = "docker.io/parity/polkadot-parachain:v1.19.0"
+
+# And this one takes the defaults for both.
+[[parachains]]
+type = "people"
+enabled = true

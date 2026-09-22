@@ -38,7 +38,8 @@ use crate::utils::{
 };
 
 use crate::config::{
-    get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain, Step,
+    get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain,
+    SpawnSetup, Step,
 };
 use crate::manifest::{self, ChainEntry, Manifest};
 use crate::metadata::ChainMetadata;
@@ -54,6 +55,9 @@ const VALIDATOR_ENV: (&str, &str) = ("ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FI
 #[derive(Debug, Clone)]
 struct ChainArtifact {
     cmd: String,
+    /// Image to set as `default_image`, only honored by providers that use
+    /// images (docker/k8s), the native provider ignores it.
+    image: Option<String>,
     chain: String,
     spec_path: String,
     snap_path: String,
@@ -71,6 +75,7 @@ pub async fn doppelganger_inner(
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,
     database: &str,
+    spawn_setup: &SpawnSetup,
     opts: &BiteOptions,
 ) -> Result<(), anyhow::Error> {
     // Star the node and wait until finish (with temp dir managed by us)
@@ -234,7 +239,8 @@ pub async fn doppelganger_inner(
         ));
 
         para_artifacts.push(ChainArtifact {
-            cmd: context_para.cmd(),
+            cmd: spawn_setup.para_command(para.id()),
+            image: spawn_setup.para_image(para.id()).map(str::to_string),
             chain: if sync_chain.contains('/') {
                 para.as_chain_string(&relay_chain.as_chain_string())
             } else {
@@ -346,7 +352,8 @@ pub async fn doppelganger_inner(
         // v1.22.1+): without it the dispute coordinator scans ancestor headers
         // a warp-synced bite does not have, never initializes, and caps
         // finality at the bite block forever while blocks keep being produced.
-        cmd: context_relay.cmd(),
+        cmd: spawn_setup.relay_command(),
+        image: spawn_setup.relay_image().map(str::to_string),
         chain: sync_chain,
         spec_path: r_chain_spec_path,
         snap_path: r_snap_path,
@@ -857,7 +864,15 @@ async fn generate_config(
 
         let relay_builder = r
             .with_chain(relaychain.chain.as_str())
-            .with_default_command(relaychain.cmd.as_str())
+            .with_default_command(relaychain.cmd.as_str());
+
+        let relay_builder = if let Some(image) = &relaychain.image {
+            relay_builder.with_default_image(image.as_str())
+        } else {
+            relay_builder
+        };
+
+        let relay_builder = relay_builder
             .with_chain_spec_path(chain_spec_path)
             .with_default_db_snapshot(db_path)
             .with_default_args(default_args);
@@ -962,7 +977,15 @@ async fn generate_config(
                 let para_builder = p
                     .with_id(para_id)
                     .with_chain(para.chain.as_str())
-                    .with_default_command(para.cmd.as_str())
+                    .with_default_command(para.cmd.as_str());
+
+                let para_builder = if let Some(image) = &para.image {
+                    para_builder.with_default_image(image.as_str())
+                } else {
+                    para_builder
+                };
+
+                let para_builder = para_builder
                     .with_chain_spec_path(chain_spec_path)
                     .with_default_db_snapshot(db_path);
 
@@ -1317,6 +1340,7 @@ mod test {
 
         let relay = ChainArtifact {
             cmd: "doppelganger".into(),
+            image: None,
             chain: "polkadot".into(),
             spec_path: relay_spec_path.into(),
             snap_path: relay_snap_path.into(),
@@ -1327,6 +1351,7 @@ mod test {
         };
         let ah = ChainArtifact {
             cmd: "doppelganger-parachain".into(),
+            image: None,
             chain: "ah-polkadot".into(),
             spec_path: ah_spec_path.into(),
             snap_path: ah_snap_path.into(),
