@@ -6,11 +6,11 @@ default-run = "zombie-bite"
 
 
 [dependencies]
-zombienet-sdk = "0.4.13"
-zombienet-provider = "0.4.13"
-zombienet-orchestrator = "0.4.13"
-zombienet-support = "0.4.13"
-zombienet-configuration = "0.4.13"
+zombienet-sdk = "0.5.1"
+zombienet-provider = "0.5.1"
+zombienet-orchestrator = "0.5.1"
+zombienet-support = "0.5.1"
+zombienet-configuration = "0.5.1"
 clap = { version = "4.4.18", features = ["derive"] }
 tokio = "1"
 reqwest = { version = "0.12", features = ["json"] }
