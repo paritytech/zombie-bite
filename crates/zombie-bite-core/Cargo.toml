@@ -3,8 +3,13 @@ name = "zombie-bite-core"
 description = "Fork a live relay chain and its parachains into a local network"
 version.workspace = true
 edition.workspace = true
+rust-version.workspace = true
 license.workspace = true
 repository.workspace = true
+keywords.workspace = true
+categories = ["development-tools::testing", "cryptography::cryptocurrencies"]
+readme = "README.md"
+include = ["src/**/*.rs", "README.md"]
 
 [dependencies]
 zombienet-sdk = "0.5.1"

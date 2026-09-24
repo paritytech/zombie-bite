@@ -58,3 +58,14 @@ jobs:
 
       - name: Tests
         run: cargo test
+
+      - name: Check docs
+        run: cargo doc --no-deps -p zombie-bite-core
+        env:
+          RUSTDOCFLAGS: "-Dwarnings"
+
+      # Own target dir: the verify step builds zombie-bite against a registry
+      # copy of zombie-bite-core, which cargo never rebuilds for the same
+      # version, so a cached build would hide api changes.
+      - name: Check crates can be published
+        run: cargo publish --workspace --dry-run --target-dir ${{ runner.temp }}/publish-check
