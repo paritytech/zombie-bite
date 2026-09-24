@@ -97,12 +97,12 @@ async fn main() -> Result<(), anyhow::Error> {
                     resolved_config.base_path.to_string_lossy()
                 );
 
-                resolve_if_dir_exist(&resolved_config.base_path, step).await;
+                resolve_if_dir_exist(&resolved_config.base_path, step).await?;
                 let network = spawn(step, resolved_config.base_path.as_path(), None, None)
                     .await
                     .expect("spawn should works");
 
-                ensure_startup_producing_blocks(&network).await;
+                ensure_startup_producing_blocks(&network).await?;
 
                 verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
 
@@ -159,13 +159,13 @@ async fn main() -> Result<(), anyhow::Error> {
                 std::process::exit(1);
             }
 
-            resolve_if_dir_exist(&resolved_config.base_path, step).await;
+            resolve_if_dir_exist(&resolved_config.base_path, step).await?;
 
             let network = spawn(step, resolved_config.base_path.as_path(), None, None)
                 .await
                 .expect("spawn should works");
 
-            ensure_startup_producing_blocks(&network).await;
+            ensure_startup_producing_blocks(&network).await?;
 
             verify::verify_fork(&network, resolved_config.base_path.as_path()).await?;
 
