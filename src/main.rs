@@ -14,12 +14,15 @@ use zombie_bite::{
         ensure_startup_producing_blocks, post_spawn_loop, resolve_if_dir_exist,
         tear_down_and_generate, STOP_FILE,
     },
+    resolve::{
+        get_base_path, resolve_bite_config, resolve_spawn_config, BiteOverrides, SpawnOverrides,
+    },
     upgrade, verify,
 };
 
 mod cli;
 
-use cli::{get_base_path, resolve_bite_config, resolve_spawn_config, Args, Commands};
+use cli::{Args, Commands};
 
 #[tokio::main(flavor = "multi_thread")]
 async fn main() -> Result<(), anyhow::Error> {
@@ -57,39 +60,22 @@ async fn main() -> Result<(), anyhow::Error> {
 
             let resolved_config = resolve_bite_config(
                 config,
-                relay,
-                relay_runtime,
-                relay_bite_at,
-                parachains,
-                base_path,
-                rc_sync_url,
-                and_spawn,
-                relay_upgrade,
-                para_upgrade,
-                apply_upgrade,
-                keep_messaging_state,
-                para_cores,
-                publish_bootnodes,
+                BiteOverrides {
+                    relay,
+                    relay_runtime,
+                    relay_bite_at,
+                    parachains,
+                    base_path,
+                    rc_sync_url,
+                    and_spawn,
+                    relay_upgrade,
+                    para_upgrade,
+                    apply_upgrade,
+                    keep_messaging_state,
+                    para_cores,
+                    publish_bootnodes,
+                },
             )?;
-
-            if resolved_config.publish_bootnodes.is_some() && !resolved_config.and_spawn {
-                bail!("--publish-bootnodes can only be used with --and-spawn");
-            }
-            if resolved_config.apply_upgrade && !resolved_config.and_spawn {
-                bail!("--apply-upgrade can only be used with --and-spawn");
-            }
-            if resolved_config.apply_upgrade && resolved_config.opts.upgrades.is_empty() {
-                bail!("--apply-upgrade needs an upgrade to carry (--rc-upgrade / --para-upgrade)");
-            }
-
-            if resolved_config.relaychain.is_custom() {
-                if resolved_config.relaychain.chain_spec().is_none() {
-                    bail!("a custom relay needs a chain-spec: use -r custom%<name>%<rpc>%<chain_spec>");
-                }
-                if resolved_config.relaychain.sync_url().is_none() {
-                    bail!("a custom relay needs an rpc endpoint: use -r custom%<name>%<rpc>%<chain_spec>");
-                }
-            }
 
             debug!("{:?}", resolved_config.relaychain);
             doppelganger_inner(
@@ -149,10 +135,12 @@ async fn main() -> Result<(), anyhow::Error> {
         } => {
             let resolved_config = resolve_spawn_config(
                 config,
-                base_path,
-                with_monitor,
-                apply_upgrade,
-                publish_bootnodes,
+                SpawnOverrides {
+                    base_path,
+                    with_monitor,
+                    apply_upgrade,
+                    publish_bootnodes,
+                },
             )?;
             let step: Step = step.into();
 

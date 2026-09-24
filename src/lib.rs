@@ -12,6 +12,7 @@ pub mod metadata;
 pub mod monit;
 pub mod network;
 pub mod overrides;
+pub mod resolve;
 pub mod sync;
 pub mod upgrade;
 pub mod utils;
