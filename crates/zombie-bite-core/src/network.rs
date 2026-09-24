@@ -20,7 +20,7 @@ use crate::{
 /// Signal for spawn to 'stop' and generate the artifacts
 pub const STOP_FILE: &str = "stop.txt";
 
-pub async fn resolve_if_dir_exist(base_path: &Path, step: Step) {
+pub async fn resolve_if_dir_exist(base_path: &Path, step: Step) -> Result<(), anyhow::Error> {
     let base_path_str = base_path.to_string_lossy();
     let path_to_use = format!("{base_path_str}/{}", step.dir());
     let mut path_with_suffix = format!("{base_path_str}/{}", step.dir());
@@ -36,13 +36,15 @@ pub async fn resolve_if_dir_exist(base_path: &Path, step: Step) {
     if path_to_use != path_with_suffix {
         // spawn exist and we need to move the content
         warn!("'{}' dir exist, moving to {path_with_suffix}", step.dir());
-        fs::rename(&path_to_use, &path_with_suffix)
-            .await
-            .expect("mv should work");
+        fs::rename(&path_to_use, &path_with_suffix).await?;
     }
+
+    Ok(())
 }
 
-pub async fn ensure_startup_producing_blocks(network: &Network<LocalFileSystem>) {
+pub async fn ensure_startup_producing_blocks(
+    network: &Network<LocalFileSystem>,
+) -> Result<(), anyhow::Error> {
     // Check metrics for all parachains and their collators
     let parachains = network.parachains();
     for para in parachains {
@@ -50,25 +52,24 @@ pub async fn ensure_startup_producing_blocks(network: &Network<LocalFileSystem>)
             debug!("Waiting metrics for collator {}", collator.name());
             collator
                 .wait_metric_with_timeout("node_roles", |x| x > 1.0, 300_u64)
-                .await
-                .unwrap();
+                .await?;
         }
     }
 
     // ensure block production
     let client = network
-        .get_node("alice")
-        .unwrap()
+        .get_node("alice")?
         .wait_client::<zombienet_sdk::subxt::PolkadotConfig>()
-        .await
-        .unwrap();
-    let mut blocks = client.blocks().subscribe_finalized().await.unwrap().take(3);
+        .await?;
+    let mut blocks = client.blocks().subscribe_finalized().await?.take(3);
 
     while let Some(block) = blocks.next().await {
-        info!("Block #{}", block.unwrap().header().number);
+        info!("Block #{}", block?.header().number);
     }
 
     info!("🚀🚀🚀 network is up and running...");
+
+    Ok(())
 }
 
 pub async fn post_spawn_loop(
@@ -120,12 +121,8 @@ pub async fn tear_down_and_generate(
 
     if let Ok(true) = teardown_signal {
         // create the artifacts
-        doppelganger::generate_artifacts(base_path.clone(), step, &rc)
-            .await
-            .expect("generate should works");
-        doppelganger::clean_up_dir_for_step(base_path.clone(), step, &rc, &[])
-            .await
-            .expect("clean-up should works");
+        doppelganger::generate_artifacts(base_path.clone(), step, &rc).await?;
+        doppelganger::clean_up_dir_for_step(base_path.clone(), step, &rc, &[]).await?;
 
         if let (Some(host), Some(chains)) = (publish_bootnodes, bootnodes) {
             let spec_dir = base_path.join(step.dir());

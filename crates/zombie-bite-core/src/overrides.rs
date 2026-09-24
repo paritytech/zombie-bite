@@ -197,16 +197,24 @@ impl<'a> OverrideSet<'a> {
 /// `authorize_upgrade(hash)` referendum leaves behind. The permissionless
 /// `apply_authorized_upgrade(blob)` can then enact the upgrade through the
 /// production path, which needs no sudo (usable on Kusama/Polkadot forks).
-async fn inject_authorized_upgrade(set: &mut OverrideSet<'_>, upgrade_wasm: &str) {
-    let wasm_content = fs::read(upgrade_wasm)
-        .await
-        .unwrap_or_else(|_| panic!("Error reading upgrade wasm from path {}", upgrade_wasm));
+async fn inject_authorized_upgrade(
+    set: &mut OverrideSet<'_>,
+    upgrade_wasm: &str,
+) -> Result<(), anyhow::Error> {
+    let wasm_content = read_wasm(upgrade_wasm, "upgrade wasm").await?;
     // CodeUpgradeAuthorization { code_hash, check_version: true }
     let value = format!(
         "{}01",
         hex::encode(subhasher::blake2_256(&wasm_content[..]))
     );
     set.inject_required("System", "AuthorizedUpgrade", value);
+    Ok(())
+}
+
+async fn read_wasm(path: &str, what: &str) -> Result<Vec<u8>, anyhow::Error> {
+    fs::read(path)
+        .await
+        .map_err(|e| anyhow::anyhow!("Error reading {what} from path {path}: {e}"))
 }
 
 /// Patch `num_cores` into the live `HostConfiguration`, leaving every other
@@ -613,23 +621,19 @@ pub async fn generate_default_overrides_for_rc(
     }
 
     if let Some(override_wasm) = relay.wasm_overrides() {
-        let wasm_content = fs::read(override_wasm)
-            .await
-            .unwrap_or_else(|_| panic!("Error reading override_wasm from path {}", override_wasm));
+        let wasm_content = read_wasm(override_wasm, "override_wasm").await?;
         set.set_raw("3a636f6465", hex::encode(wasm_content));
     }
 
     if let Some(upgrade_wasm) = maybe_upgrade {
-        inject_authorized_upgrade(&mut set, upgrade_wasm).await;
+        inject_authorized_upgrade(&mut set, upgrade_wasm).await?;
     }
 
     // also check if any parachain includes a wasm override but we can't doit in the
     // augmented logic since we need to _inject_ keys
     for para in paras {
         if let Some(override_wasm) = para.wasm_overrides() {
-            let wasm_content = fs::read(override_wasm).await.unwrap_or_else(|_| {
-                panic!("Error reading override_wasm from path {}", override_wasm)
-            });
+            let wasm_content = read_wasm(override_wasm, "override_wasm").await?;
             let code_hash = hex::encode(subhasher::blake2_256(&wasm_content[..]));
             let para_id_map_key = crate::utils::para_id_for_map_hash(para.id());
 
@@ -722,14 +726,12 @@ pub async fn generate_default_overrides_for_para(
     }
 
     if let Some(override_wasm) = para.wasm_overrides() {
-        let wasm_content = fs::read(override_wasm)
-            .await
-            .unwrap_or_else(|_| panic!("Error reading override_wasm from path {}", override_wasm));
+        let wasm_content = read_wasm(override_wasm, "override_wasm").await?;
         set.set_raw("3a636f6465", hex::encode(wasm_content));
     }
 
     if let Some(upgrade_wasm) = maybe_upgrade {
-        inject_authorized_upgrade(&mut set, upgrade_wasm).await;
+        inject_authorized_upgrade(&mut set, upgrade_wasm).await?;
     }
 
     let (overrides, injects) = set.finish(&format!("para {}", para.id()))?;
@@ -952,13 +954,26 @@ mod test {
     }
 
     #[tokio::test]
+    async fn inject_authorized_upgrade_errors_on_missing_wasm() {
+        let mut set = OverrideSet::new(None);
+        let err = inject_authorized_upgrade(&mut set, "/nonexistent/upgrade.wasm")
+            .await
+            .unwrap_err();
+        assert!(err
+            .to_string()
+            .starts_with("Error reading upgrade wasm from path /nonexistent/upgrade.wasm"));
+    }
+
+    #[tokio::test]
     async fn inject_authorized_upgrade_seeds_hash_and_check_version() {
         let wasm_path = "/tmp/zombie-bite-test-upgrade.wasm";
         let wasm = b"not-a-real-runtime";
         tokio::fs::write(wasm_path, wasm).await.unwrap();
 
         let mut set = OverrideSet::new(None);
-        inject_authorized_upgrade(&mut set, wasm_path).await;
+        inject_authorized_upgrade(&mut set, wasm_path)
+            .await
+            .unwrap();
 
         let expected = format!("{}01", hex::encode(subhasher::blake2_256(&wasm[..])));
         assert_eq!(

@@ -53,25 +53,25 @@ pub fn get_base_path(cli_base_path: Option<String>) -> PathBuf {
 #[derive(Debug, Clone, Default)]
 pub struct BiteOverrides {
     /// Relay to bite: polkadot, kusama, paseo, westend or
-    /// custom%<name>%<rpc_endpoint>%<chain_spec_path>.
+    /// `custom%<name>%<rpc_endpoint>%<chain_spec_path>`.
     pub relay: Option<String>,
     /// Runtime to install on the forked relay.
     pub relay_runtime: Option<String>,
     /// Block height to bite the relay at.
     pub relay_bite_at: Option<u32>,
     /// Parachains to include (asset-hub, coretime, people, bridge-hub,
-    /// collectives or custom%<para_id>%<rpc>%<chain_spec>%[req_cores]).
+    /// collectives or `custom%<para_id>%<rpc>%<chain_spec>%[req_cores]`).
     pub parachains: Option<Vec<String>>,
     pub base_path: Option<String>,
     pub rc_sync_url: Option<String>,
     pub and_spawn: bool,
     /// Runtime to carry as an authorized upgrade for the relay.
     pub relay_upgrade: Option<String>,
-    /// Authorized upgrades for parachains, as <para_id>=<wasm_path>.
+    /// Authorized upgrades for parachains, as `<para_id>=<wasm_path>`.
     pub para_upgrade: Vec<String>,
     pub apply_upgrade: bool,
     pub keep_messaging_state: bool,
-    /// Cores per parachain, as <para_id>=<cores>.
+    /// Cores per parachain, as `<para_id>=<cores>`.
     pub para_cores: Vec<String>,
     /// Host to advertise the spawned nodes under as bootNodes.
     pub publish_bootnodes: Option<String>,
@@ -198,9 +198,9 @@ pub fn resolve_bite_config(
     // Resolve parachains (CLI overrides config file)
     let resolved_parachains = if let Some(cli_paras) = parachains {
         // CLI specified parachains
-        cli_paras
-            .iter()
-            .filter_map(|p| match p.as_str() {
+        let mut paras = vec![];
+        for p in &cli_paras {
+            let para = match p.as_str() {
                 "asset-hub" => Some(Parachain::AssetHub {
                     maybe_override: None,
                     maybe_bite_at: None,
@@ -226,9 +226,7 @@ pub fn resolve_bite_config(
                     maybe_bite_at: None,
                     maybe_rpc_endpoint: None,
                 }),
-                s if s.starts_with("custom%") => {
-                    Some(resolve_custom_parachain(s))
-                }
+                s if s.starts_with("custom%") => Some(resolve_custom_parachain(s)?),
                 unknown => {
                     warn!(
                         "⚠️  Warning: Unknown parachain '{}' will be ignored.
@@ -237,11 +235,13 @@ pub fn resolve_bite_config(
                     );
                     None
                 }
-            })
-            .collect()
+            };
+            paras.extend(para);
+        }
+        paras
     } else if let Some(ref config) = config_file {
         // Use config file parachains
-        config.get_parachains().to_vec()
+        config.get_parachains()?
     } else {
         vec![]
     };
@@ -284,7 +284,7 @@ pub fn resolve_bite_config(
             upgrades.relay = config.relaychain.upgrade.clone();
         }
         for para_cfg in config.parachains.as_deref().unwrap_or_default() {
-            if let (Some(upgrade), Some(para)) = (&para_cfg.upgrade, para_cfg.to_parachain()) {
+            if let (Some(upgrade), Some(para)) = (&para_cfg.upgrade, para_cfg.to_parachain()?) {
                 upgrades.paras.entry(para.id()).or_insert(upgrade.clone());
             }
         }
@@ -310,7 +310,7 @@ pub fn resolve_bite_config(
     let mut cores: CoresOverride = CoresOverride::new();
     if let Some(ref config) = config_file {
         for para_cfg in config.parachains.as_deref().unwrap_or_default() {
-            if let (Some(c), Some(para)) = (para_cfg.cores, para_cfg.to_parachain()) {
+            if let (Some(c), Some(para)) = (para_cfg.cores, para_cfg.to_parachain()?) {
                 cores.insert(para.id(), c);
             }
         }
@@ -444,30 +444,30 @@ fn resolve_custom_relaychain(
     ))
 }
 
-fn resolve_custom_parachain(s: &str) -> Parachain {
+fn resolve_custom_parachain(s: &str) -> Result<Parachain, anyhow::Error> {
     let parts: Vec<&str> = s.splitn(5, '%').collect();
     trace!("custom parts: {parts:?}");
     if parts.len() < 4 || parts.len() > 5 {
-        panic!(
+        bail!(
             "Custom parachain format must be custom%<para_id>%<rpc_endpoint>%<chain_spec_path>%[req_cores], got: {}",
             s
         );
     }
     let para_id: u32 = parts[1]
         .parse()
-        .unwrap_or_else(|_| panic!("Invalid para_id '{}' in custom parachain", parts[1]));
+        .map_err(|_| anyhow!("Invalid para_id '{}' in custom parachain", parts[1]))?;
     let rpc_endpoint = parts[2].to_string();
     let chain_spec = parts[3].to_string();
     let name = format!("custom-{}", para_id);
     let req_cores = if parts.len() == 5 {
         parts[4]
             .parse()
-            .unwrap_or_else(|_| panic!("Invalid req_cores '{}' in custom parachain", parts[4]))
+            .map_err(|_| anyhow!("Invalid req_cores '{}' in custom parachain", parts[4]))?
     } else {
         // default to 1 core
         1
     };
-    Parachain::Custom {
+    Ok(Parachain::Custom {
         id: para_id,
         name,
         chain_spec,
@@ -475,7 +475,7 @@ fn resolve_custom_parachain(s: &str) -> Parachain {
         maybe_bite_at: None,
         maybe_rpc_endpoint: Some(rpc_endpoint),
         cores: req_cores,
-    }
+    })
 }
 
 #[cfg(test)]
@@ -484,7 +484,7 @@ mod test {
     #[test]
     fn custom_para_works() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com%/path/to/chain-spec.json";
-        let para = resolve_custom_parachain(s);
+        let para = resolve_custom_parachain(s).unwrap();
         assert_eq!(para.id(), 3392, "para id should be valid");
         assert_eq!(
             para.rpc_endpoint(),
@@ -501,7 +501,7 @@ mod test {
     #[test]
     fn custom_para_works_with_port_number() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json";
-        let para = resolve_custom_parachain(s);
+        let para = resolve_custom_parachain(s).unwrap();
         assert_eq!(
             para.rpc_endpoint(),
             Some("wss://kusama-yap-3392.example.com:1234"),
@@ -512,29 +512,35 @@ mod test {
     #[test]
     fn custom_para_works_with_cores() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%3";
-        let para = resolve_custom_parachain(s);
+        let para = resolve_custom_parachain(s).unwrap();
         assert_eq!(para.req_cores(), Some(3), "cores should match");
     }
 
     #[test]
     fn custom_para_works_with_default_cores() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json";
-        let para = resolve_custom_parachain(s);
+        let para = resolve_custom_parachain(s).unwrap();
         assert_eq!(para.req_cores(), Some(1), "cores should match");
     }
 
     #[test]
-    #[should_panic(expected = "Invalid para_id 'abc3392' in custom parachain")]
     fn custom_para_id_parse_err() {
         let s = "custom%abc3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%3";
-        let _para = resolve_custom_parachain(s);
+        let err = resolve_custom_parachain(s).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid para_id 'abc3392' in custom parachain"
+        );
     }
 
     #[test]
-    #[should_panic(expected = "Invalid req_cores 'abc' in custom parachain")]
     fn custom_para_cores_parse_err() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json%abc";
-        let _para = resolve_custom_parachain(s);
+        let err = resolve_custom_parachain(s).unwrap_err();
+        assert_eq!(
+            err.to_string(),
+            "Invalid req_cores 'abc' in custom parachain"
+        );
     }
     #[test]
     fn custom_relay_works() {
