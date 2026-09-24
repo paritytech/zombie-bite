@@ -53,25 +53,25 @@ pub fn get_base_path(cli_base_path: Option<String>) -> PathBuf {
 #[derive(Debug, Clone, Default)]
 pub struct BiteOverrides {
     /// Relay to bite: polkadot, kusama, paseo, westend or
-    /// custom%<name>%<rpc_endpoint>%<chain_spec_path>.
+    /// `custom%<name>%<rpc_endpoint>%<chain_spec_path>`.
     pub relay: Option<String>,
     /// Runtime to install on the forked relay.
     pub relay_runtime: Option<String>,
     /// Block height to bite the relay at.
     pub relay_bite_at: Option<u32>,
     /// Parachains to include (asset-hub, coretime, people, bridge-hub,
-    /// collectives or custom%<para_id>%<rpc>%<chain_spec>%[req_cores]).
+    /// collectives or `custom%<para_id>%<rpc>%<chain_spec>%[req_cores]`).
     pub parachains: Option<Vec<String>>,
     pub base_path: Option<String>,
     pub rc_sync_url: Option<String>,
     pub and_spawn: bool,
     /// Runtime to carry as an authorized upgrade for the relay.
     pub relay_upgrade: Option<String>,
-    /// Authorized upgrades for parachains, as <para_id>=<wasm_path>.
+    /// Authorized upgrades for parachains, as `<para_id>=<wasm_path>`.
     pub para_upgrade: Vec<String>,
     pub apply_upgrade: bool,
     pub keep_messaging_state: bool,
-    /// Cores per parachain, as <para_id>=<cores>.
+    /// Cores per parachain, as `<para_id>=<cores>`.
     pub para_cores: Vec<String>,
     /// Host to advertise the spawned nodes under as bootNodes.
     pub publish_bootnodes: Option<String>,

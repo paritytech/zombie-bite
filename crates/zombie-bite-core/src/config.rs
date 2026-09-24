@@ -16,13 +16,13 @@ const AFTER: &str = "after";
 const DEBUG: &str = "debug";
 
 // `--state-pruning` config flag (two days +1 by default)
-pub const STATE_PRUNING: &str = "256";
-pub fn get_state_pruning_config() -> String {
+pub(crate) const STATE_PRUNING: &str = "256";
+pub(crate) fn get_state_pruning_config() -> String {
     env::var("ZOMBIE_BITE_STATE_PRUNING").unwrap_or_else(|_| STATE_PRUNING.to_string())
 }
 
-pub const AH_POLKADOT_RCP: &str = "https://asset-hub-polkadot-rpc.n.dwellir.com";
-pub const AH_KUSAMA_RCP: &str = "https://asset-hub-kusama-rpc.n.dwellir.com";
+pub(crate) const AH_POLKADOT_RCP: &str = "https://asset-hub-polkadot-rpc.n.dwellir.com";
+pub(crate) const AH_KUSAMA_RCP: &str = "https://asset-hub-kusama-rpc.n.dwellir.com";
 
 #[derive(Debug, PartialEq, Clone, Copy)]
 pub enum Step {
@@ -85,7 +85,7 @@ impl From<String> for Step {
     }
 }
 #[derive(Debug, PartialEq)]
-pub enum BiteMethod {
+pub(crate) enum BiteMethod {
     DoppelGanger,
     Fork,
 }
@@ -104,7 +104,7 @@ where
 }
 
 #[derive(Debug, PartialEq)]
-pub enum Context {
+pub(crate) enum Context {
     Relaychain,
     Parachain,
 }
@@ -167,7 +167,7 @@ type MaybeChainSpec = Option<String>;
 /// spawner so the validator set in state always matches the nodes running.
 // TODO: the upper bound is only there because we reuse the well-known dev
 // accounts; generating keys would let a fork scale past 7 validators.
-pub fn num_validators_for_cores(req_cores: u32) -> u32 {
+pub(crate) fn num_validators_for_cores(req_cores: u32) -> u32 {
     (1 + req_cores).clamp(2, 7)
 }
 
@@ -267,7 +267,11 @@ pub struct BiteOptions {
     pub keep_messaging_state: bool,
 }
 
-pub fn get_assigned_cores(relay: &Relaychain, para: &Parachain, override_: &CoresOverride) -> u32 {
+pub(crate) fn get_assigned_cores(
+    relay: &Relaychain,
+    para: &Parachain,
+    override_: &CoresOverride,
+) -> u32 {
     if let Some(cores) = override_.get(&para.id()) {
         return *cores;
     }
@@ -478,7 +482,7 @@ impl Relaychain {
             .to_string()
     }
 
-    pub fn context(&self) -> Context {
+    pub(crate) fn context(&self) -> Context {
         Context::Relaychain
     }
 
@@ -615,7 +619,7 @@ impl Parachain {
         format!("{para_part}-{relay_part}")
     }
 
-    pub fn context(&self) -> Context {
+    pub(crate) fn context(&self) -> Context {
         Context::Parachain
     }
 
@@ -726,7 +730,7 @@ impl Parachain {
 // Chain generator command template
 const CMD_TPL: &str = "chain-spec-generator {{chainName}}";
 
-pub const DEFAULT_CHAIN_SPEC_TPL_COMMAND: &str =
+pub(crate) const DEFAULT_CHAIN_SPEC_TPL_COMMAND: &str =
     "{{mainCommand}} build-spec --chain {{chainName}} {{disableBootnodes}}";
 
 // Relaychain nodes
@@ -738,7 +742,7 @@ const EVE: &str = "eve";
 const FERDIE: &str = "ferdie";
 const ONE: &str = "one";
 
-pub fn generate_network_config(
+pub(crate) fn generate_network_config(
     network: &Relaychain,
     paras: Vec<Parachain>,
     spawn_setup: &SpawnSetup,

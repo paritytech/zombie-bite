@@ -70,7 +70,7 @@ struct ChainArtifact {
     cores: u32,
 }
 
-pub async fn doppelganger_inner(
+pub async fn bite(
     global_base_dir: PathBuf,
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,

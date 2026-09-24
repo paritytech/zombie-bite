@@ -7,9 +7,9 @@ use tracing::{debug, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 
 use zombie_bite_core::{
-    bundle,
+    bite, bundle, clean_up_dir_for_step,
     config::{Relaychain, Step},
-    doppelganger::{self, doppelganger_inner},
+    generate_artifacts,
     network::{
         ensure_startup_producing_blocks, post_spawn_loop, resolve_if_dir_exist,
         tear_down_and_generate, STOP_FILE,
@@ -17,7 +17,7 @@ use zombie_bite_core::{
     resolve::{
         get_base_path, resolve_bite_config, resolve_spawn_config, BiteOverrides, SpawnOverrides,
     },
-    upgrade, verify,
+    spawn, upgrade, verify,
 };
 
 mod cli;
@@ -78,7 +78,7 @@ async fn main() -> Result<(), anyhow::Error> {
             )?;
 
             debug!("{:?}", resolved_config.relaychain);
-            doppelganger_inner(
+            bite(
                 resolved_config.base_path.clone(),
                 resolved_config.relaychain,
                 resolved_config.parachains,
@@ -98,10 +98,9 @@ async fn main() -> Result<(), anyhow::Error> {
                 );
 
                 resolve_if_dir_exist(&resolved_config.base_path, step).await;
-                let network =
-                    doppelganger::spawn(step, resolved_config.base_path.as_path(), None, None)
-                        .await
-                        .expect("spawn should works");
+                let network = spawn(step, resolved_config.base_path.as_path(), None, None)
+                    .await
+                    .expect("spawn should works");
 
                 ensure_startup_producing_blocks(&network).await;
 
@@ -162,10 +161,9 @@ async fn main() -> Result<(), anyhow::Error> {
 
             resolve_if_dir_exist(&resolved_config.base_path, step).await;
 
-            let network =
-                doppelganger::spawn(step, resolved_config.base_path.as_path(), None, None)
-                    .await
-                    .expect("spawn should works");
+            let network = spawn(step, resolved_config.base_path.as_path(), None, None)
+                .await
+                .expect("spawn should works");
 
             ensure_startup_producing_blocks(&network).await;
 
@@ -206,7 +204,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let rc = Relaychain::new(&relay);
             let step: Step = step.into();
             let base_path = get_base_path(base_path);
-            doppelganger::generate_artifacts(base_path, step, &rc)
+            generate_artifacts(base_path, step, &rc)
                 .await
                 .expect("generate artifacts should work")
         }
@@ -218,7 +216,7 @@ async fn main() -> Result<(), anyhow::Error> {
             let rc = Relaychain::new(&relay);
             let step: Step = step.into();
             let base_path = get_base_path(base_path);
-            doppelganger::clean_up_dir_for_step(base_path, step, &rc, &[])
+            clean_up_dir_for_step(base_path, step, &rc, &[])
                 .await
                 .expect("clean-up should works");
         }
