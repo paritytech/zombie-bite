@@ -11075,11 +11075,22 @@ dependencies = [
 
 [[package]]
 name = "zombie-bite"
-version = "0.4.0"
+version = "0.5.0"
+dependencies = [
+ "anyhow",
+ "clap",
+ "tokio",
+ "tracing",
+ "tracing-subscriber",
+ "zombie-bite-core",
+]
+
+[[package]]
+name = "zombie-bite-core"
+version = "0.5.0"
 dependencies = [
  "anyhow",
  "array-bytes",
- "clap",
  "flate2",
  "futures",
  "fxhash",

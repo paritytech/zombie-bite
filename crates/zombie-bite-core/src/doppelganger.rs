@@ -70,7 +70,7 @@ struct ChainArtifact {
     cores: u32,
 }
 
-pub async fn doppelganger_inner(
+pub async fn bite(
     global_base_dir: PathBuf,
     relay_chain: Relaychain,
     paras_to: Vec<Parachain>,
@@ -194,11 +194,9 @@ pub async fn doppelganger_inner(
             // understand arbitrary runtimes.
             let spec_content = tokio::fs::read_to_string(&sync_chain)
                 .await
-                .unwrap_or_else(|_| panic!("Failed to read custom chain spec: {}", sync_chain));
+                .map_err(|e| anyhow!("Failed to read custom chain spec {sync_chain}: {e}"))?;
             let mut spec_json: serde_json::Value = serde_json::from_str(&spec_content)
-                .unwrap_or_else(|_| {
-                    panic!("Failed to parse custom chain spec JSON: {}", sync_chain)
-                });
+                .map_err(|e| anyhow!("Failed to parse custom chain spec JSON {sync_chain}: {e}"))?;
             spec_json["bootNodes"] = serde_json::Value::Array(vec![]);
             let contents = serde_json::to_string_pretty(&spec_json).unwrap();
             tokio::fs::write(&chain_spec_path, contents).await.unwrap();
@@ -423,7 +421,8 @@ pub async fn doppelganger_inner(
     let global_base_dir_str = global_base_dir.to_string_lossy();
     if let Some(upgrade_wasm) = &opts.upgrades.relay {
         let blob_name = format!("{}-upgrade.wasm", relay_chain.as_chain_string());
-        let (blob, hash) = copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
+        let (blob, hash) =
+            copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await?;
         ready_content["rc_upgrade_wasm"] = json!(blob);
         ready_content["rc_upgrade_hash"] = json!(hash);
     }
@@ -434,7 +433,7 @@ pub async fn doppelganger_inner(
                 para.as_chain_string(&relay_chain.as_chain_string())
             );
             let (blob, hash) =
-                copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await;
+                copy_upgrade_blob(upgrade_wasm, &global_base_dir_str, &blob_name).await?;
             ready_content[format!("para_{}_upgrade_wasm", para.id())] = json!(blob);
             ready_content[format!("para_{}_upgrade_hash", para.id())] = json!(hash);
         }
@@ -563,15 +562,17 @@ fn build_manifest(
     }
 }
 
-async fn copy_upgrade_blob(from: &str, base_dir: &str, blob_name: &str) -> (String, String) {
+async fn copy_upgrade_blob(
+    from: &str,
+    base_dir: &str,
+    blob_name: &str,
+) -> Result<(String, String), anyhow::Error> {
     let wasm = fs::read(from)
         .await
-        .unwrap_or_else(|_| panic!("Error reading upgrade wasm from path {from}"));
-    fs::write(format!("{base_dir}/{blob_name}"), &wasm)
-        .await
-        .expect("write upgrade blob should works");
+        .map_err(|e| anyhow!("Error reading upgrade wasm from path {from}: {e}"))?;
+    fs::write(format!("{base_dir}/{blob_name}"), &wasm).await?;
     let hash = format!("0x{}", hex::encode(subhasher::blake2_256(&wasm[..])));
-    (blob_name.to_string(), hash)
+    Ok((blob_name.to_string(), hash))
 }
 
 /// Create the needed artifats for the next step

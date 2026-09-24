@@ -1,38 +1,15 @@
-[package]
-name = "zombie-bite"
-version = "0.4.0"
+[workspace]
+resolver = "2"
+members = ["crates/zombie-bite", "crates/zombie-bite-core"]
+
+[workspace.package]
+version = "0.5.0"
 edition = "2021"
-default-run = "zombie-bite"
-
-
-[dependencies]
-zombienet-sdk = "0.5.1"
-zombienet-provider = "0.5.1"
-zombienet-orchestrator = "0.5.1"
-zombienet-support = "0.5.1"
-zombienet-configuration = "0.5.1"
-clap = { version = "4.4.18", features = ["derive"] }
-tokio = "1"
-reqwest = { version = "0.12", features = ["json"] }
-tracing-subscriber = "0.3.18"
-anyhow = "1.0"
-tracing = "0.1"
-fxhash = "0.2"
-serde = "1"
-serde_json = "1"
-substorager = "0.11"
-subhasher = "0.11"
-array-bytes = "6.2"
-codec = { package = "parity-scale-codec", version = "3.6.12", default-features = false, features = ["derive"] }
-futures = "0.3"
-hex = "0.4"
-scale-value = "0.16"
-tar = "0.4"
-flate2 = "1.0"
-sp-core = "34.0.0"
-toml = "0.9"
-
-
+# zombienet-sdk 0.5 needs 1.90
+rust-version = "1.90"
+license = "Apache-2.0"
+repository = "https://github.com/pepoviola/zombie-bite"
+keywords = ["polkadot", "substrate", "zombienet", "fork", "testing"]
 
 # local patch
 #[patch.crates-io]
