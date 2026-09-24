@@ -1,6 +1,6 @@
 //! Fork a live relay chain (and its parachains) into a local network.
 //!
-//! The `zombie-bite` binary is a thin CLI over this crate: every step it runs
+//! The `zombie-bite` cli is a thin wrapper over this crate: every step it runs
 //! (bite, spawn, pack, generate artifacts, clean up) is available here.
 
 pub mod bootnodes;

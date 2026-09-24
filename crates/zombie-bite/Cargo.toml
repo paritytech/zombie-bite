@@ -1,0 +1,15 @@
+[package]
+name = "zombie-bite"
+description = "Cli to fork a live relay chain and its parachains into a local network"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+repository.workspace = true
+
+[dependencies]
+zombie-bite-core = { path = "../zombie-bite-core", version = "0.4.0" }
+anyhow = "1.0"
+clap = { version = "4.4.18", features = ["derive"] }
+tokio = "1"
+tracing = "0.1"
+tracing-subscriber = "0.3.18"

@@ -6,7 +6,7 @@ use tokio::fs;
 use tracing::{debug, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 
-use zombie_bite::{
+use zombie_bite_core::{
     bundle,
     config::{Relaychain, Step},
     doppelganger::{self, doppelganger_inner},

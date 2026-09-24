@@ -56,8 +56,5 @@ jobs:
       - name: Build
         run:  cargo build
 
-      - name: Build library without the cli
-        run: cargo build --lib --no-default-features
-
       - name: Tests
         run: cargo test

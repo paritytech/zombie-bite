@@ -1987,7 +1987,11 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
 
     #[test]
     fn example_with_images_toml_is_valid() {
-        let config = ZombieBiteConfig::from_file("./examples/with-images.toml").unwrap();
+        let config = ZombieBiteConfig::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/with-images.toml"
+        ))
+        .unwrap();
         let setup = config.get_spawn_setup();
         setup.validate().unwrap();
 
