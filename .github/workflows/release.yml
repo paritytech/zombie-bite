@@ -113,7 +113,8 @@ jobs:
             exit 1
           fi
 
-      - name: Publish to crates.io
-        run: SKIP_WASM_BUILD=1 cargo publish --workspace
-        env:
-          CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
+      # commented until we move to parity-publish
+      # - name: Publish to crates.io
+      #   run: SKIP_WASM_BUILD=1 cargo publish --workspace
+      #   env:
+      #     CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}
