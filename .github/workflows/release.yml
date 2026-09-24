@@ -89,3 +89,32 @@ jobs:
           draft: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  publish:
+    runs-on: ubuntu-latest
+    # crates.io uploads can't be undone, so only publish once the release is out
+    needs: release
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # 5.0.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: deps
+        run: sudo apt-get update && sudo apt-get install -y protobuf-compiler
+
+      - name: Check the tag matches the crates version
+        run: |
+          version=$(cargo metadata --no-deps --format-version 1 | jq -r '.packages[] | select(.name == "zombie-bite-core") | .version')
+          if [[ "v$version" != "${{ github.ref_name }}" ]]; then
+            echo "tag ${{ github.ref_name }} does not match crates version $version"
+            exit 1
+          fi
+
+      # commented until we move to parity-publish
+      # - name: Publish to crates.io
+      #   run: SKIP_WASM_BUILD=1 cargo publish --workspace
+      #   env:
+      #     CARGO_REGISTRY_TOKEN: ${{ secrets.CARGO_REGISTRY_TOKEN }}

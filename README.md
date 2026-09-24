@@ -54,6 +54,27 @@ Options:
 ```
 
 
+### Using it as a library
+
+Everything the cli does is available from the
+[`zombie-bite-core`](https://crates.io/crates/zombie-bite-core) crate, the cli
+is a thin wrapper over it:
+
+```toml
+[dependencies]
+zombie-bite-core = "0.5"
+```
+
+See its [README](crates/zombie-bite-core/README.md) for an example.
+
+### Installing
+
+```sh
+cargo install zombie-bite
+```
+
+or download a binary from the [releases](https://github.com/pepoviola/zombie-bite/releases).
+
 ### AHM flow
 
 `zombie-bite` was originally created to support the Asset-Hub Migration (AHM) workflow. The initial AHM-focused implementation is available in the [archive-ahm](https://github.com/paritytech/zombie-bite/tree/archive-ahm).
