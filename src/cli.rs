@@ -8,7 +8,7 @@ use std::{
 };
 use tracing::{trace, warn};
 
-use crate::config::{
+use zombie_bite::config::{
     BiteOptions, CoresOverride, Parachain, Relaychain, SpawnSetup, Upgrades, ZombieBiteConfig,
 };
 
