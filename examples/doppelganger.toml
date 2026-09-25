@@ -1,0 +1,21 @@
+# Zombie Bite Configuration - Specific doppelganger build
+# `[doppelganger]` sets the binaries the `bite` step syncs the live chains
+# with, and builds their chain-specs with. Both keys are optional: an unset one
+# falls back to `doppelganger` / `doppelganger-parachain` from PATH.
+#
+# A path must be an executable file. Keep the release's
+# `polkadot-execute-worker` / `polkadot-prepare-worker` next to it: doppelganger
+# looks for its workers in its own directory.
+
+base_path = "/tmp/polkadot-bite"
+
+[relaychain]
+network = "polkadot"
+
+[[parachains]]
+type = "asset-hub"
+enabled = true
+
+[doppelganger]
+relay = "/opt/doppelganger/v0.2.3/doppelganger"
+parachain = "/opt/doppelganger/v0.2.3/doppelganger-parachain"

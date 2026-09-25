@@ -11,7 +11,8 @@ use std::{
 use tracing::{trace, warn};
 
 use crate::config::{
-    BiteOptions, CoresOverride, Parachain, Relaychain, SpawnSetup, Upgrades, ZombieBiteConfig,
+    BiteOptions, CoresOverride, DoppelgangerSetup, Parachain, Relaychain, SpawnSetup, Upgrades,
+    ZombieBiteConfig,
 };
 
 const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];
@@ -75,6 +76,10 @@ pub struct BiteOverrides {
     pub para_cores: Vec<String>,
     /// Host to advertise the spawned nodes under as bootNodes.
     pub publish_bootnodes: Option<String>,
+    /// `doppelganger` binary to sync the relay chain with.
+    pub doppelganger: Option<String>,
+    /// `doppelganger-parachain` binary to sync the parachains with.
+    pub doppelganger_parachain: Option<String>,
 }
 
 /// Values that take precedence over the config file when resolving a spawn.
@@ -153,6 +158,8 @@ pub fn resolve_bite_config(
         keep_messaging_state,
         para_cores,
         publish_bootnodes,
+        doppelganger,
+        doppelganger_parachain,
     } = overrides;
 
     // Load config file if provided
@@ -306,6 +313,20 @@ pub fn resolve_bite_config(
         SpawnSetup::default()
     };
     spawn_setup.validate()?;
+
+    // Doppelganger binaries: each cli flag wins over its config-file key.
+    let mut doppelganger_setup = if let Some(ref config) = config_file {
+        config.get_doppelganger_setup()
+    } else {
+        DoppelgangerSetup::default()
+    };
+    if doppelganger.is_some() {
+        doppelganger_setup.relay = doppelganger;
+    }
+    if doppelganger_parachain.is_some() {
+        doppelganger_setup.para = doppelganger_parachain;
+    }
+    doppelganger_setup.validate()?;
     // Per-para cores: CLI entries win over the config file's `cores`.
     let mut cores: CoresOverride = CoresOverride::new();
     if let Some(ref config) = config_file {
@@ -362,6 +383,7 @@ pub fn resolve_bite_config(
             upgrades,
             cores,
             keep_messaging_state: resolved_keep_messaging,
+            doppelganger: doppelganger_setup,
         },
     };
     resolved.validate()?;
@@ -582,5 +604,95 @@ mod test {
         let rc = Relaychain::new("previewnet");
         assert_eq!(rc.as_chain_string(), "previewnet");
         assert!(rc.is_custom());
+    }
+
+    fn write_config(name: &str, contents: &str) -> String {
+        let path = std::env::temp_dir().join(format!("zb-{name}-{}.toml", std::process::id()));
+        std::fs::write(&path, contents).unwrap();
+        path.to_string_lossy().into_owned()
+    }
+
+    #[test]
+    fn doppelganger_defaults_to_path_lookup() {
+        let resolved = resolve_bite_config(
+            None,
+            BiteOverrides {
+                base_path: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        assert_eq!(resolved.opts.doppelganger, DoppelgangerSetup::default());
+    }
+
+    #[test]
+    fn doppelganger_flags_win_over_the_config_file() {
+        // Bare names, so validation has no file to look for.
+        let config = write_config(
+            "doppelganger-precedence",
+            r#"
+            [relaychain]
+            network = "polkadot"
+
+            [doppelganger]
+            relay = "doppelganger-from-config"
+            parachain = "doppelganger-parachain-from-config"
+            "#,
+        );
+
+        let from_config = resolve_bite_config(
+            Some(config.clone()),
+            BiteOverrides {
+                base_path: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            from_config.opts.doppelganger.relay_command(),
+            "doppelganger-from-config"
+        );
+        assert_eq!(
+            from_config.opts.doppelganger.para_command(),
+            "doppelganger-parachain-from-config"
+        );
+
+        // Each flag overrides its own key only.
+        let with_flag = resolve_bite_config(
+            Some(config.clone()),
+            BiteOverrides {
+                base_path: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                doppelganger: Some("doppelganger-from-flag".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+        assert_eq!(
+            with_flag.opts.doppelganger.relay_command(),
+            "doppelganger-from-flag"
+        );
+        assert_eq!(
+            with_flag.opts.doppelganger.para_command(),
+            "doppelganger-parachain-from-config"
+        );
+
+        std::fs::remove_file(config).unwrap();
+    }
+
+    #[test]
+    fn a_doppelganger_path_that_does_not_exist_fails_resolution() {
+        let err = resolve_bite_config(
+            None,
+            BiteOverrides {
+                base_path: Some(std::env::temp_dir().to_string_lossy().into_owned()),
+                doppelganger_parachain: Some("/definitely/not/here".to_string()),
+                ..Default::default()
+            },
+        )
+        .unwrap_err()
+        .to_string();
+
+        assert!(err.contains("for parachain"), "{err}");
     }
 }

@@ -265,6 +265,77 @@ pub struct BiteOptions {
     pub upgrades: Upgrades,
     pub cores: CoresOverride,
     pub keep_messaging_state: bool,
+    /// Which `doppelganger` binaries sync the live chains and build their
+    /// chain-specs.
+    pub doppelganger: DoppelgangerSetup,
+}
+
+/// The `doppelganger` binaries the *bite* step runs, as opposed to
+/// [`SpawnSetup`], which is what the spawned network runs.
+///
+/// Unset fields fall back to the bare `doppelganger` / `doppelganger-parachain`
+/// names, resolved from `PATH`.
+#[derive(Debug, Default, Clone, PartialEq)]
+pub struct DoppelgangerSetup {
+    /// Syncs the relay chain and builds its chain-spec.
+    pub relay: Option<String>,
+    /// Syncs the parachains and builds their chain-specs.
+    pub para: Option<String>,
+}
+
+impl DoppelgangerSetup {
+    pub fn relay_command(&self) -> String {
+        self.relay
+            .clone()
+            .unwrap_or_else(|| Context::Relaychain.doppelganger_cmd())
+    }
+
+    pub fn para_command(&self) -> String {
+        self.para
+            .clone()
+            .unwrap_or_else(|| Context::Parachain.doppelganger_cmd())
+    }
+
+    /// Validate with zombienet's own `Command`, and check that a value naming
+    /// a file (anything with a `/` in it) is one that can be run. Either
+    /// mistake would otherwise only surface when the first sync node fails to
+    /// start.
+    pub fn validate(&self) -> Result<(), anyhow::Error> {
+        for (label, command) in [("relay", &self.relay), ("parachain", &self.para)] {
+            let Some(command) = command else {
+                continue;
+            };
+
+            Command::try_from(command.as_str())
+                .map_err(|e| anyhow::anyhow!("invalid `doppelganger` command for {label}: {e}"))?;
+
+            if command.contains('/') {
+                ensure_executable(command).map_err(|e| {
+                    anyhow::anyhow!("invalid `doppelganger` command for {label}: {e}")
+                })?;
+            }
+        }
+
+        Ok(())
+    }
+}
+
+fn ensure_executable(path: &str) -> Result<(), anyhow::Error> {
+    let metadata =
+        std::fs::metadata(path).map_err(|e| anyhow::anyhow!("can't read '{path}': {e}"))?;
+    if !metadata.is_file() {
+        anyhow::bail!("'{path}' is not a file");
+    }
+
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        if metadata.permissions().mode() & 0o111 == 0 {
+            anyhow::bail!("'{path}' is not executable");
+        }
+    }
+
+    Ok(())
 }
 
 pub(crate) fn get_assigned_cores(
@@ -894,6 +965,17 @@ pub struct ZombieBiteConfig {
     /// Hostname or IP to advertise the spawned nodes under in the published
     /// chain-specs.
     pub publish_bootnodes: Option<String>,
+    /// The `doppelganger` binaries the bite step runs.
+    pub doppelganger: Option<DoppelgangerConfig>,
+}
+
+/// `[doppelganger]` table of the config file, see [`DoppelgangerSetup`].
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct DoppelgangerConfig {
+    /// Defaults to `doppelganger`.
+    pub relay: Option<String>,
+    /// Defaults to `doppelganger-parachain`.
+    pub parachain: Option<String>,
 }
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
@@ -1016,6 +1098,16 @@ impl ZombieBiteConfig {
             }
         }
         Ok(paras)
+    }
+
+    /// The `[doppelganger]` table as a [`DoppelgangerSetup`], empty when the
+    /// table is absent.
+    pub fn get_doppelganger_setup(&self) -> DoppelgangerSetup {
+        let config = self.doppelganger.clone().unwrap_or_default();
+        DoppelgangerSetup {
+            relay: config.relay,
+            para: config.parachain,
+        }
     }
 
     /// Collect the `command` / `image` of every chain, keyed by para id for
@@ -1462,6 +1554,7 @@ mod test {
             apply_upgrade: None,
             keep_messaging_state: None,
             publish_bootnodes: None,
+            doppelganger: None,
         };
 
         assert_eq!(config.get_parachains().unwrap().len(), 0);
@@ -1526,6 +1619,7 @@ mod test {
             apply_upgrade: None,
             keep_messaging_state: None,
             publish_bootnodes: None,
+            doppelganger: None,
         };
 
         let parachains = config.get_parachains().unwrap();
@@ -1858,6 +1952,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             apply_upgrade: None,
             keep_messaging_state: None,
             publish_bootnodes: None,
+            doppelganger: None,
         }
     }
 
@@ -2035,5 +2130,143 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
         );
         assert_eq!(custom.sync_endpoint(), "wss://my-own-kusama.example.com");
         assert_eq!(custom.rpc_endpoint(), "wss://my-own-kusama.example.com");
+    }
+
+    /// A unique, empty scratch dir under the system temp dir.
+    fn scratch_dir(name: &str) -> std::path::PathBuf {
+        let dir = std::env::temp_dir().join(format!("zb-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    fn doppelganger_setup_falls_back_to_builtin_defaults() {
+        let setup = DoppelgangerSetup::default();
+
+        assert_eq!(setup.relay_command(), "doppelganger");
+        assert_eq!(setup.para_command(), "doppelganger-parachain");
+        assert!(setup.validate().is_ok());
+    }
+
+    #[test]
+    fn doppelganger_setup_validate_checks_the_file() {
+        use std::os::unix::fs::PermissionsExt;
+
+        let dir = scratch_dir("doppelganger-validate");
+        let runnable = dir.join("doppelganger");
+        std::fs::write(&runnable, "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(&runnable, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let not_runnable = dir.join("doppelganger-parachain");
+        std::fs::write(&not_runnable, "").unwrap();
+        std::fs::set_permissions(&not_runnable, std::fs::Permissions::from_mode(0o644)).unwrap();
+
+        let ok = DoppelgangerSetup {
+            relay: Some(runnable.to_string_lossy().into_owned()),
+            para: None,
+        };
+        assert!(ok.validate().is_ok());
+        assert_eq!(ok.relay_command(), runnable.to_string_lossy());
+
+        let not_executable = DoppelgangerSetup {
+            relay: None,
+            para: Some(not_runnable.to_string_lossy().into_owned()),
+        };
+        let err = not_executable.validate().unwrap_err().to_string();
+        assert!(err.contains("for parachain"), "{err}");
+        assert!(err.contains("is not executable"), "{err}");
+
+        let missing = DoppelgangerSetup {
+            relay: Some(dir.join("nope").to_string_lossy().into_owned()),
+            para: None,
+        };
+        let err = missing.validate().unwrap_err().to_string();
+        assert!(err.contains("for relay"), "{err}");
+        assert!(err.contains("can't read"), "{err}");
+
+        let a_dir = DoppelgangerSetup {
+            relay: Some(dir.to_string_lossy().into_owned()),
+            para: None,
+        };
+        let err = a_dir.validate().unwrap_err().to_string();
+        assert!(err.contains("is not a file"), "{err}");
+
+        // Same rule as `SpawnSetup`: no args smuggled into the command.
+        let with_args = DoppelgangerSetup {
+            relay: Some("doppelganger --foo".to_string()),
+            para: None,
+        };
+        let err = with_args.validate().unwrap_err().to_string();
+        assert!(
+            err.contains("invalid `doppelganger` command for relay"),
+            "{err}"
+        );
+
+        // A bare name is left to PATH, as the default is: nothing to check.
+        let bare = DoppelgangerSetup {
+            relay: Some("my-doppelganger".to_string()),
+            para: None,
+        };
+        assert!(bare.validate().is_ok());
+
+        std::fs::remove_dir_all(&dir).unwrap();
+    }
+
+    #[test]
+    fn config_file_reads_the_doppelganger_table() {
+        let config: ZombieBiteConfig = toml::from_str(
+            r#"
+            [relaychain]
+            network = "polkadot"
+
+            [doppelganger]
+            relay = "/opt/doppelganger/doppelganger"
+            parachain = "/opt/doppelganger/doppelganger-parachain"
+            "#,
+        )
+        .unwrap();
+
+        let setup = config.get_doppelganger_setup();
+        assert_eq!(setup.relay_command(), "/opt/doppelganger/doppelganger");
+        assert_eq!(
+            setup.para_command(),
+            "/opt/doppelganger/doppelganger-parachain"
+        );
+    }
+
+    #[test]
+    fn example_doppelganger_toml_is_valid() {
+        let config = ZombieBiteConfig::from_file(concat!(
+            env!("CARGO_MANIFEST_DIR"),
+            "/../../examples/doppelganger.toml"
+        ))
+        .unwrap();
+
+        // Not `validate()`: the example points at paths that won't exist here.
+        let setup = config.get_doppelganger_setup();
+        assert_eq!(
+            setup.relay_command(),
+            "/opt/doppelganger/v0.2.3/doppelganger"
+        );
+        assert_eq!(
+            setup.para_command(),
+            "/opt/doppelganger/v0.2.3/doppelganger-parachain"
+        );
+    }
+
+    #[test]
+    fn config_file_without_a_doppelganger_table_keeps_the_defaults() {
+        let config: ZombieBiteConfig = toml::from_str(
+            r#"
+            [relaychain]
+            network = "polkadot"
+            "#,
+        )
+        .unwrap();
+
+        assert_eq!(
+            config.get_doppelganger_setup(),
+            DoppelgangerSetup::default()
+        );
     }
 }

@@ -18,9 +18,12 @@ The flow mirrors the cli subcommands:
 4. **pack** / **unpack** (`bundle`): move the artifacts to another machine as a
    single file.
 
-The same external binaries as the cli are needed in `PATH` (doppelganger,
+The same external binaries as the cli are needed (doppelganger,
 `polkadot`, `polkadot-parachain`), see the
 [repository README](https://github.com/pepoviola/zombie-bite#requirements).
+They are looked up on `PATH` unless configured: `BiteOptions::doppelganger`
+(a `DoppelgangerSetup`) sets the doppelganger binaries the bite runs, and
+`SpawnSetup` sets the command / image of the spawned network.
 
 ## Example
 
