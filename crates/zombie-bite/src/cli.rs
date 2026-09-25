@@ -8,6 +8,9 @@ pub struct Args {
 }
 
 #[derive(Subcommand, Debug, Clone)]
+// Parsed once from argv, so the size gap between `Bite` and the other
+// subcommands costs nothing worth boxing clap fields over.
+#[allow(clippy::large_enum_variant)]
 pub enum Commands {
     /// Bite the running network using 'doppelganger' binaries, and generate the artifacts for spawning.
     Bite {
@@ -80,6 +83,16 @@ pub enum Commands {
         /// Db to use
         #[arg(long, value_parser = clap::builder::PossibleValuesParser::new(["rocksdb", "paritydb"]), default_value="rocksdb", verbatim_doc_comment)]
         database: String,
+        /// `doppelganger` binary to sync the relay chain with.
+        /// If not specified, will use the `[doppelganger]` table of the config,
+        /// and if not there, `doppelganger` from PATH.
+        #[arg(long, verbatim_doc_comment)]
+        doppelganger: Option<String>,
+        /// `doppelganger-parachain` binary to sync the parachains with.
+        /// If not specified, will use the `[doppelganger]` table of the config,
+        /// and if not there, `doppelganger-parachain` from PATH.
+        #[arg(long, verbatim_doc_comment)]
+        doppelganger_parachain: Option<String>,
     },
     /// Spawn a new instance of the network from the bite step.
     Spawn {

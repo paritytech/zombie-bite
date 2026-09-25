@@ -10,7 +10,7 @@
 
 ### Requirements
 
-You need these binaries available in your `PATH`:
+You need these binaries available in your `PATH`, or configured by path (see [Use a specific doppelganger build](#use-a-specific-doppelganger-build) and [Set the command / image of the spawned network](#set-the-command--image-of-the-spawned-network)):
 
 - [Doppelganger binaries](https://github.com/paritytech/doppelganger-wrapper) (doppelganger, doppelganger-parachain, workers) — v0.2.3 or newer. The bite syncs state without range proofs (a chain whose staking lives on Asset Hub cannot be synced with them: sync freezes silently at ~37%); older builds ignore that setting and freeze on such chains.
 - `polkadot` and `polkadot-parachain` for the spawned network — polkadot v1.22.1 or newer: the spawn relies on `ZOMBIE_DISPUTE_CANDIDATE_LIFETIME_AFTER_FINALIZATION` ([polkadot-sdk#12247](https://github.com/paritytech/polkadot-sdk/pull/12247)); on older binaries the fork produces blocks but never finalizes.
@@ -146,7 +146,32 @@ They land as `default_command` / `default_image` in the generated `config.toml`,
 - `command` takes effect immediately, including with `zombie-bite spawn`, and is the way to point at a local build instead of relying on `PATH`. It cannot contain whitespace; extra args still go through `ZOMBIE_BITE_RC_EXTRA_ARGS` / `ZOMBIE_BITE_AH_EXTRA_ARGS`.
 - `image` is only honored by providers that use images (docker/k8s). `zombie-bite spawn` uses the native provider, which ignores it, so `image` is a pass-through for feeding the generated `config.toml` to zombienet elsewhere.
 
-There are no cli flags for these, they are config-file only. Neither key affects the `bite` step itself, which always runs the `doppelganger` / `doppelganger-parachain` binaries. See [examples/with-images.toml](./examples/with-images.toml).
+There are no cli flags for these, they are config-file only. Neither key affects the `bite` step itself, which runs the `doppelganger` / `doppelganger-parachain` binaries (see below). See [examples/with-images.toml](./examples/with-images.toml).
+
+#### Use a specific doppelganger build
+
+The `bite` step syncs the live chains with `doppelganger` (relay) and `doppelganger-parachain` (parachains), and uses the same binaries to build their chain-specs. By default both are resolved from `PATH`. To run a specific build instead, e.g. a downloaded [doppelganger-wrapper release](https://github.com/paritytech/doppelganger-wrapper/releases), point at it from the config file:
+
+```toml
+[doppelganger]
+relay = "/opt/doppelganger/v0.2.3/doppelganger"
+parachain = "/opt/doppelganger/v0.2.3/doppelganger-parachain"
+```
+
+or with the matching flags, which win over the config file key by key:
+
+```sh
+zombie-bite bite -r polkadot -p asset-hub \
+  --doppelganger /opt/doppelganger/v0.2.3/doppelganger \
+  --doppelganger-parachain /opt/doppelganger/v0.2.3/doppelganger-parachain
+```
+
+- Both are optional and independent: an unset one keeps the `PATH` default.
+- A value with a `/` in it must be an executable file, checked before any sync starts. A bare name is looked up on `PATH`, like the default. As with `command`, no whitespace: it's a binary, not a command line.
+- Keep the release's `polkadot-execute-worker` / `polkadot-prepare-worker` in the same directory as the binaries: doppelganger looks for its workers next to itself.
+- This only affects the `bite` step. The spawned network runs whatever `command` says (above).
+
+See [examples/doppelganger.toml](./examples/doppelganger.toml).
 #### Forking a relay that is not a public network
 
 `-r` also takes `custom%<name>%<rpc_endpoint>%<chain_spec_path>`, for a relay zombie-bite has no built-in knowledge of:

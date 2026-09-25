@@ -38,8 +38,8 @@ use crate::utils::{
 };
 
 use crate::config::{
-    get_assigned_cores, get_state_pruning_config, BiteOptions, Context, Parachain, Relaychain,
-    SpawnSetup, Step,
+    get_assigned_cores, get_state_pruning_config, BiteOptions, Parachain, Relaychain, SpawnSetup,
+    Step,
 };
 use crate::manifest::{self, ChainEntry, Manifest};
 use crate::metadata::ChainMetadata;
@@ -78,9 +78,15 @@ pub async fn bite(
     spawn_setup: &SpawnSetup,
     opts: &BiteOptions,
 ) -> Result<(), anyhow::Error> {
+    // Fail before any sync starts: a bad path would otherwise only show up
+    // when the first sync node can't be spawned.
+    opts.doppelganger.validate()?;
+    let doppelganger_relay = opts.doppelganger.relay_command();
+    let doppelganger_para = opts.doppelganger.para_command();
+
     // Star the node and wait until finish (with temp dir managed by us)
     info!(
-        "🪞 Starting DoppelGanger process for {} and {:?}",
+        "🪞 Starting DoppelGanger process for {} and {:?} (relay: {doppelganger_relay}, paras: {doppelganger_para})",
         relay_chain.as_chain_string(),
         paras_to
     );
@@ -150,7 +156,7 @@ pub async fn bite(
         syncs.push(
             sync_para(
                 ns.clone(),
-                "doppelganger-parachain",
+                &doppelganger_para,
                 para,
                 &relay_chain,
                 relay_chain.sync_endpoint(),
@@ -168,7 +174,6 @@ pub async fn bite(
     // loop over paras
     let mut para_artifacts = vec![];
     let mut para_heads_env = vec![];
-    let context_para = Context::Parachain;
     for (para_index, (_sync_node, sync_db_path, sync_chain, sync_head_path)) in
         res.into_iter().enumerate()
     {
@@ -204,7 +209,7 @@ pub async fn bite(
             generate_chain_spec(
                 ns.clone(),
                 &chain_spec_path,
-                &context_para.doppelganger_cmd(),
+                &doppelganger_para,
                 &sync_chain,
             )
             .await
@@ -290,7 +295,7 @@ pub async fn bite(
 
     let (sync_node, sync_db_path, sync_chain) = sync_relay_only(
         ns.clone(),
-        "doppelganger",
+        &doppelganger_relay,
         &relay_chain,
         para_heads_env,
         rc_default_overrides_path,
@@ -306,12 +311,11 @@ pub async fn bite(
 
     // get the chain-spec (prod) and clean the bootnodes
     // relaychain
-    let context_relay = Context::Relaychain;
     let r_chain_spec_path = format!("{}/{}-spec.json", base_dir_str, sync_chain);
     generate_chain_spec(
         ns.clone(),
         &r_chain_spec_path,
-        &context_relay.doppelganger_cmd(),
+        &doppelganger_relay,
         &relay_chain.chain_arg(),
     )
     .await
@@ -1150,48 +1154,6 @@ async fn generate_chain_spec(
 
     tokio::fs::write(&chain_spec_path, contents).await.unwrap();
     info!("✅ generated with path {chain_spec_path}");
-
-    Ok(())
-}
-
-async fn run_doppelganger_node(ns: DynNamespace, base_path: &Path) -> Result<(), String> {
-    let data_path = format!("{}/sync_db", base_path.to_string_lossy());
-    let logs_path = format!("{}/sync.log", base_path.to_string_lossy());
-    info!(
-        "⛓  Syncing using warp, this could take a while. You can follow the logs with: \n\t
-    tail -f {}",
-        &logs_path
-    );
-
-    let temp_node = ns
-        .spawn_node(
-            &SpawnNodeOptions::new("temp-doppelganger", "bash")
-                .args(vec!["-c", "while :; do sleep 60; done"]),
-        )
-        .await
-        .unwrap();
-
-    let _stdout = temp_node
-        .run_command(
-            RunCommandOptions::new("bash")
-                .args(vec![
-                    "-c",
-                    format!(
-                        "doppelganger -l doppelganger=debug --chain kusama --sync warp -d {} > {} 2>&1",
-                        data_path, logs_path
-                    )
-                    .as_str(),
-                ])
-                // Override rust log for sync
-                .env(vec![("RUST_LOG", "")]),
-        )
-        .await
-        .unwrap()
-        .unwrap();
-
-    temp_node.destroy().await.unwrap();
-
-    info!("✅ Synced");
 
     Ok(())
 }

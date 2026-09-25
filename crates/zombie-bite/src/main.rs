@@ -53,6 +53,8 @@ async fn main() -> Result<(), anyhow::Error> {
             keep_messaging_state,
             para_cores,
             publish_bootnodes,
+            doppelganger,
+            doppelganger_parachain,
         } => {
             if with_monitor && !and_spawn {
                 bail!("--with-monitor can only be used with --and-spawn");
@@ -74,6 +76,8 @@ async fn main() -> Result<(), anyhow::Error> {
                     keep_messaging_state,
                     para_cores,
                     publish_bootnodes,
+                    doppelganger,
+                    doppelganger_parachain,
                 },
             )?;
 
