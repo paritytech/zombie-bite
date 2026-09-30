@@ -10,6 +10,11 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+## [0.6.0] - 2026-09-30
+
+First tagged release with both crates. `0.5.0` was published to crates.io
+from the library split before it was merged, and has no tag.
+
 ### Added
 
 - `zombie-bite-core` library crate. Everything the cli does can now be
@@ -290,7 +295,8 @@ First tagged release.
 - Collator log levels ([#45]).
 - `ZOMBIE_SUDO` to set the sudo key and the `RcMigrator` manager ([#44]).
 
-[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.4.0...HEAD
+[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.0...HEAD
+[0.6.0]: https://github.com/pepoviola/zombie-bite/compare/v0.4.0...v0.6.0
 [0.4.0]: https://github.com/pepoviola/zombie-bite/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pepoviola/zombie-bite/compare/v0.2.26...v0.3.0
 [0.2.26]: https://github.com/pepoviola/zombie-bite/compare/v0.2.24...v0.2.26

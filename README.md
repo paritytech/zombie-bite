@@ -62,7 +62,7 @@ is a thin wrapper over it:
 
 ```toml
 [dependencies]
-zombie-bite-core = "0.5"
+zombie-bite-core = "0.6"
 ```
 
 See its [README](crates/zombie-bite-core/README.md) for an example.
