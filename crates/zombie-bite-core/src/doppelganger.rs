@@ -850,6 +850,52 @@ async fn generate_config(
     // Must match the validator set installed by the state overrides.
     let num_validators = crate::config::num_validators_for_cores(req_cores) as usize;
 
+    // Everything a parachain needs that has to be awaited, done before the
+    // builder below exists: zombienet's builders hold an `Rc<RefCell<…>>`, so
+    // keeping one alive across an `.await` makes the whole `bite` future
+    // `!Send`, and `bite` unusable from a multi-threaded runtime.
+    let mut prepared_paras = Vec::with_capacity(paras.len());
+    for para in paras {
+        let (chain_spec_path, db_path) = if let Ok(ci_path) = env::var("ZOMBIE_BITE_CI_PATH") {
+            let chain_spec_path = PathBuf::from(para.spec_path.as_str());
+            let chain_spec_filename = chain_spec_path
+                .file_name()
+                .unwrap()
+                .to_string_lossy()
+                .to_string();
+
+            let db_path = PathBuf::from(para.snap_path.as_str());
+            let db_path_filename = db_path.file_name().unwrap().to_string_lossy().to_string();
+
+            let new_chain_spec_path = PathBuf::from(&format!("{ci_path}/{}", chain_spec_filename));
+            let new_db_path = PathBuf::from(&format!("{ci_path}/{}", db_path_filename));
+
+            tokio::fs::rename(chain_spec_path, &new_chain_spec_path)
+                .await
+                .unwrap();
+            tokio::fs::rename(db_path, &new_db_path).await.unwrap();
+
+            (
+                PathBuf::from(format!("./{}", chain_spec_filename)),
+                PathBuf::from(format!("./{}", db_path_filename)),
+            )
+        } else {
+            (
+                PathBuf::from(para.spec_path.as_str()),
+                PathBuf::from(para.snap_path.as_str()),
+            )
+        };
+
+        let para_rpc_port: u16 = if let Ok(port) = env::var("ZOMBIE_BITE_AH_PORT") {
+            port.parse()
+                .expect("env var ZOMBIE_BITE_AH_PORT must be a valid u16")
+        } else {
+            get_random_port().await
+        };
+
+        prepared_paras.push((para, chain_spec_path, db_path, para_rpc_port));
+    }
+
     // config a new network with dynamic validators
     let mut config = NetworkConfigBuilder::new().with_relaychain(|r| {
         let mut default_args = vec![
@@ -908,99 +954,59 @@ async fn generate_config(
         }
     });
 
-    if !paras.is_empty() {
-        for para in paras {
-            let (chain_spec_path, db_path) = if let Ok(ci_path) = env::var("ZOMBIE_BITE_CI_PATH") {
-                let chain_spec_path = PathBuf::from(para.spec_path.as_str());
-                let chain_spec_filename = chain_spec_path
-                    .file_name()
-                    .unwrap()
-                    .to_string_lossy()
-                    .to_string();
+    for (para, chain_spec_path, db_path, para_rpc_port) in prepared_paras {
+        let mut para_default_args = vec![
+            (
+                "--relay-chain-rpc-urls",
+                format!("ws://127.0.0.1:{rpc_alice_port}").as_str(),
+            )
+                .into(),
+            ("-l", para_leaked_rust_log.as_str()).into(),
+            "--force-authoring".into(),
+            "--discover-local".into(),
+            "--allow-private-ip".into(),
+            "--no-hardware-benchmarks".into(),
+            ("--state-pruning", get_state_pruning_config().as_str()).into(),
+            ("--database", database).into(),
+        ];
 
-                let db_path = PathBuf::from(para.snap_path.as_str());
-                let db_path_filename = db_path.file_name().unwrap().to_string_lossy().to_string();
-
-                let new_chain_spec_path =
-                    PathBuf::from(&format!("{ci_path}/{}", chain_spec_filename));
-                let new_db_path = PathBuf::from(&format!("{ci_path}/{}", db_path_filename));
-
-                tokio::fs::rename(chain_spec_path, &new_chain_spec_path)
-                    .await
-                    .unwrap();
-                tokio::fs::rename(db_path, &new_db_path).await.unwrap();
-
-                (
-                    PathBuf::from(format!("./{}", chain_spec_filename)),
-                    PathBuf::from(format!("./{}", db_path_filename)),
-                )
-            } else {
-                (
-                    PathBuf::from(para.spec_path.as_str()),
-                    PathBuf::from(para.snap_path.as_str()),
-                )
-            };
-
-            let para_rpc_port: u16 = if let Ok(port) = env::var("ZOMBIE_BITE_AH_PORT") {
-                port.parse()
-                    .expect("env var ZOMBIE_BITE_AH_PORT must be a valid u16")
-            } else {
-                get_random_port().await
-            };
-
-            let mut para_default_args = vec![
-                (
-                    "--relay-chain-rpc-urls",
-                    format!("ws://127.0.0.1:{rpc_alice_port}").as_str(),
-                )
-                    .into(),
-                ("-l", para_leaked_rust_log.as_str()).into(),
-                "--force-authoring".into(),
-                "--discover-local".into(),
-                "--allow-private-ip".into(),
-                "--no-hardware-benchmarks".into(),
-                ("--state-pruning", get_state_pruning_config().as_str()).into(),
-                ("--database", database).into(),
-            ];
-
-            if let Ok(extra_args) = env::var("ZOMBIE_BITE_AH_EXTRA_ARGS") {
-                for extra in extra_args.split(',') {
-                    para_default_args.push(extra.trim().into());
-                }
+        if let Ok(extra_args) = env::var("ZOMBIE_BITE_AH_EXTRA_ARGS") {
+            for extra in extra_args.split(',') {
+                para_default_args.push(extra.trim().into());
             }
-
-            // Elastic scaling (more than one core) requires slot-based
-            // authoring, whatever the parachain is called.
-            if para.cores > 1 {
-                para_default_args.push("--authoring=slot-based".into());
-            }
-
-            let para_id = para.para_id.expect("Para id should be available");
-            let collator_name = format!("Collator-{}", para_id);
-
-            config = config.with_parachain(|p| {
-                let para_builder = p
-                    .with_id(para_id)
-                    .with_chain(para.chain.as_str())
-                    .with_default_command(para.cmd.as_str());
-
-                let para_builder = if let Some(image) = &para.image {
-                    para_builder.with_default_image(image.as_str())
-                } else {
-                    para_builder
-                };
-
-                let para_builder = para_builder
-                    .with_chain_spec_path(chain_spec_path)
-                    .with_default_db_snapshot(db_path);
-
-                para_builder.with_collator(|c| {
-                    c.with_name(&collator_name)
-                        .with_rpc_port(para_rpc_port)
-                        .with_args(para_default_args)
-                })
-            })
         }
+
+        // Elastic scaling (more than one core) requires slot-based
+        // authoring, whatever the parachain is called.
+        if para.cores > 1 {
+            para_default_args.push("--authoring=slot-based".into());
+        }
+
+        let para_id = para.para_id.expect("Para id should be available");
+        let collator_name = format!("Collator-{}", para_id);
+
+        config = config.with_parachain(|p| {
+            let para_builder = p
+                .with_id(para_id)
+                .with_chain(para.chain.as_str())
+                .with_default_command(para.cmd.as_str());
+
+            let para_builder = if let Some(image) = &para.image {
+                para_builder.with_default_image(image.as_str())
+            } else {
+                para_builder
+            };
+
+            let para_builder = para_builder
+                .with_chain_spec_path(chain_spec_path)
+                .with_default_db_snapshot(db_path);
+
+            para_builder.with_collator(|c| {
+                c.with_name(&collator_name)
+                    .with_rpc_port(para_rpc_port)
+                    .with_args(para_default_args)
+            })
+        })
     }
 
     let config = if let Some(global_base_dir) = &global_base_dir {
