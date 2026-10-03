@@ -10,6 +10,8 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+## [0.6.1] - 2026-10-03
+
 ### Fixed
 
 - `bite`'s future is now `Send`, so it can be spawned on a multi-threaded
