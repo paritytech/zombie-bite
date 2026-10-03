@@ -10,6 +10,15 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+### Fixed
+
+- `bite`'s future is now `Send`, so it can be spawned on a multi-threaded
+  runtime or awaited inside an `async_trait` method. Two values were held
+  across an `.await`: a zombienet `NetworkConfigBuilder` (which holds an
+  `Rc<RefCell<…>>`) while each parachain's ports and paths were prepared, and
+  the runtime check behind state overrides. A compile-time test now checks
+  that every public async function's future is `Send`.
+
 ## [0.6.0] - 2026-09-30
 
 First tagged release with both crates. `0.5.0` was published to crates.io

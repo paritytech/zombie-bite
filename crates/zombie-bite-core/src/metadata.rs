@@ -24,7 +24,10 @@ pub fn storage_key(pallet: &str, item: &str) -> String {
 
 /// What an override is checked against. `ChainMetadata` is the real
 /// implementation; tests use a double.
-pub trait RuntimeCheck {
+///
+/// `Sync`, so that the `&dyn RuntimeCheck` an override set holds across an
+/// `.await` is `Send`, and so is the `bite` future holding it.
+pub trait RuntimeCheck: Sync {
     fn has_item(&self, pallet: &str, item: &str) -> bool;
     fn verify_value(&self, pallet: &str, item: &str, value_hex: &str) -> Result<(), anyhow::Error>;
 }
