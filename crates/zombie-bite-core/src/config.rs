@@ -892,7 +892,7 @@ pub(crate) fn generate_network_config(
         //     format!("{}-{}",chain_part, relay_chain)
         // };
 
-        let collator_name = format!("Collator-{}", para.id());
+        let collator_name = format!("collator-{}", para.id());
 
         builder.with_parachain(|p| {
             let p = p
