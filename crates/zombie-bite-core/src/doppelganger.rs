@@ -624,7 +624,7 @@ pub async fn generate_artifacts(
         let para_id = para_config.id();
         let para_chain = para_config.chain().expect("parachain should have a chain");
         let para_chain_str = para_chain.as_str();
-        let collator_name = format!("Collator-{}", para_id);
+        let collator_name = format!("collator-{}", para_id);
 
         // generate snapshot for this parachain's collator
         let collator_data = format!(
@@ -956,11 +956,7 @@ async fn generate_config(
 
     for (para, chain_spec_path, db_path, para_rpc_port) in prepared_paras {
         let mut para_default_args = vec![
-            (
-                "--relay-chain-rpc-urls",
-                format!("ws://127.0.0.1:{rpc_alice_port}").as_str(),
-            )
-                .into(),
+            ("--relay-chain-rpc-urls", "{{ZOMBIE:alice:internal_ws_uri}}").into(),
             ("-l", para_leaked_rust_log.as_str()).into(),
             "--force-authoring".into(),
             "--discover-local".into(),
@@ -983,7 +979,7 @@ async fn generate_config(
         }
 
         let para_id = para.para_id.expect("Para id should be available");
-        let collator_name = format!("Collator-{}", para_id);
+        let collator_name = format!("collator-{}", para_id);
 
         config = config.with_parachain(|p| {
             let para_builder = p

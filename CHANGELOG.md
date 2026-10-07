@@ -10,6 +10,23 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+## [0.6.2] - 2026-10-07
+
+### Fixed
+
+- Spawning a fork with the Kubernetes provider: each collator now reaches the
+  relay chain through zombienet's `{{ZOMBIE:alice:internal_ws_uri}}`
+  placeholder instead of a hardcoded `ws://127.0.0.1:<port>`, which only
+  works when every node runs on the same host. On k8s the placeholder
+  resolves to alice's pod address; on the other providers it is the same
+  address as before.
+
+### Changed
+
+- Bump the zombienet crates (`zombienet-sdk`, `-orchestrator`, `-provider`,
+  `-support`, `-configuration`) from 0.5.1 to 0.6.0. 0.6.0 is the first
+  release that exposes `internal_ws_uri` for a running node.
+
 ## [0.6.1] - 2026-10-03
 
 ### Fixed
@@ -306,7 +323,9 @@ First tagged release.
 - Collator log levels ([#45]).
 - `ZOMBIE_SUDO` to set the sudo key and the `RcMigrator` manager ([#44]).
 
-[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.0...HEAD
+[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.2...HEAD
+[0.6.2]: https://github.com/pepoviola/zombie-bite/compare/v0.6.1...v0.6.2
+[0.6.1]: https://github.com/pepoviola/zombie-bite/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/pepoviola/zombie-bite/compare/v0.4.0...v0.6.0
 [0.4.0]: https://github.com/pepoviola/zombie-bite/compare/v0.3.0...v0.4.0
 [0.3.0]: https://github.com/pepoviola/zombie-bite/compare/v0.2.26...v0.3.0
