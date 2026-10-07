@@ -1,0 +1,198 @@
+name: Zombie Bite CI Integration
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+    branches: [main]
+
+jobs:
+  zombie-bite-test:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@08c6903cd8c0fde910a37f88322edcfb5dd907a8 # v5.0.0
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install protobuf compiler
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y protobuf-compiler
+
+      - name: Download doppelganger binaries
+        run: |
+          VERSION_TO_DOWNLOAD=$(curl -s https://api.github.com/repos/paritytech/doppelganger-wrapper/releases/latest | jq -r .tag_name)
+          echo "Downloading doppelganger binaries version: $VERSION_TO_DOWNLOAD"
+          
+          mkdir -p ${{ github.workspace }}/bins
+          
+          for bin in doppelganger doppelganger-parachain polkadot-execute-worker polkadot-prepare-worker; do
+            echo "Downloading $bin..."
+            curl -L -o ${{ github.workspace }}/bins/$bin \
+              https://github.com/paritytech/doppelganger-wrapper/releases/download/$VERSION_TO_DOWNLOAD/$bin
+            chmod +x ${{ github.workspace }}/bins/$bin
+          done
+          
+          echo "${{ github.workspace }}/bins" >> $GITHUB_PATH
+          ls -lh ${{ github.workspace }}/bins
+
+      - name: Build zombie-bite
+        run: cargo build --release
+
+      - name: Run bite (polkadot/AH/coretime)
+        run: |
+          target/release/zombie-bite bite \
+            --rc polkadot \
+            --parachains people,coretime \
+            --base-path ${{ github.workspace }}/zombie-bite-output
+
+      - name: Run spawn in background
+        run: |
+          target/release/zombie-bite spawn \
+            --base-path ${{ github.workspace }}/zombie-bite-output &
+          echo $! > spawn.pid
+          echo "Waiting for network and Prometheus metrics to be ready..."
+          sleep 90
+
+      - name: Check spawn process
+        run: |
+          if [ ! -f spawn.pid ]; then
+            echo "Spawn process not found!"
+            exit 1
+          fi
+          
+          if ! ps -p $(cat spawn.pid) > /dev/null; then
+            echo "Spawn process died!"
+            exit 1
+          fi
+          echo "Spawn process is alive (PID: $(cat spawn.pid))"
+
+      - name: Ensure block production
+        run: |
+          ZOMBIE_JSON="${{ github.workspace }}/zombie-bite-output/spawn/zombie.json"
+          
+          if [ ! -f "$ZOMBIE_JSON" ]; then
+            echo "zombie.json not found!"
+            exit 1
+          fi
+          
+          echo "Monitoring block production (checking every 15s for up to 5 minutes)..."
+          
+          # Extract node names and prometheus URIs from zombie.json
+          VALIDATORS=$(jq -r '.relay.nodes[]? | "\(.name):\(.prometheus_uri)"' "$ZOMBIE_JSON")
+          COLLATORS=$(jq -r '.parachains[]?[]?.collators[]? | "\(.name):\(.prometheus_uri)"' "$ZOMBIE_JSON")
+          
+          echo "Validators: $VALIDATORS"
+          echo "Collators: $COLLATORS"
+          
+          MAX_ATTEMPTS=20
+          ATTEMPT=0
+          declare -A INITIAL_BLOCKS
+          
+          while [ $ATTEMPT -lt $MAX_ATTEMPTS ]; do
+            ATTEMPT=$((ATTEMPT + 1))
+            echo ""
+            echo "Check $ATTEMPT/$MAX_ATTEMPTS..."
+            
+            ALL_OK=true
+            
+            # Check validators
+            for node in $VALIDATORS; do
+              NAME=$(echo $node | cut -d: -f1)
+              METRICS_URL=$(echo $node | cut -d: -f2-)
+              BLOCK=$(curl -s "${METRICS_URL}" | grep 'block_height.*status="best"' | awk '{print $2}')
+              BLOCK=${BLOCK:-0}
+              
+              # If we haven't set initial block yet, or it was 0, set it now if we have a valid reading
+              if [ -z "${INITIAL_BLOCKS[$NAME]}" ] || [ "${INITIAL_BLOCKS[$NAME]}" -eq 0 ]; then
+                if [ "$BLOCK" -gt 0 ] 2>/dev/null; then
+                  INITIAL_BLOCKS[$NAME]=$BLOCK
+                  echo "$NAME: initial block height $BLOCK"
+                  ALL_OK=false
+                else
+                  echo "$NAME: waiting for metrics... (height: $BLOCK)"
+                  ALL_OK=false
+                fi
+              elif [ "$BLOCK" -gt "${INITIAL_BLOCKS[$NAME]}" ] 2>/dev/null; then
+                echo "$NAME: producing blocks (height: $BLOCK)"
+              else
+                echo "$NAME: waiting... (height: $BLOCK)"
+                ALL_OK=false
+              fi
+            done
+            
+            # Check collators
+            for node in $COLLATORS; do
+              NAME=$(echo $node | cut -d: -f1)
+              METRICS_URL=$(echo $node | cut -d: -f2-)
+              BLOCK=$(curl -s "${METRICS_URL}" | grep 'block_height.*status="best"' | awk '{print $2}')
+              BLOCK=${BLOCK:-0}
+              
+              # If we haven't set initial block yet, or it was 0, set it now if we have a valid reading
+              if [ -z "${INITIAL_BLOCKS[$NAME]}" ] || [ "${INITIAL_BLOCKS[$NAME]}" -eq 0 ]; then
+                if [ "$BLOCK" -gt 0 ] 2>/dev/null; then
+                  INITIAL_BLOCKS[$NAME]=$BLOCK
+                  echo "$NAME: initial block height $BLOCK"
+                  ALL_OK=false
+                else
+                  echo "$NAME: waiting for metrics... (height: $BLOCK)"
+                  ALL_OK=false
+                fi
+              elif [ "$BLOCK" -gt "${INITIAL_BLOCKS[$NAME]}" ] 2>/dev/null; then
+                echo "$NAME: producing blocks (height: $BLOCK)"
+              else
+                echo "$NAME: waiting... (height: $BLOCK)"
+                ALL_OK=false
+              fi
+            done
+            
+            if [ "$ALL_OK" = true ]; then
+              echo ""
+              echo "All nodes are producing blocks!"
+              exit 0
+            fi
+            
+            if [ $ATTEMPT -lt $MAX_ATTEMPTS ]; then
+              sleep 15
+            fi
+          done
+          
+          echo ""
+          echo "Block production timeout after 5 minutes!"
+          exit 1
+
+      - name: Cleanup
+        if: always()
+        run: |
+          if [ ! -f spawn.pid ]; then
+            echo "No spawn process to cleanup"
+            exit 0
+          fi
+          
+          PID=$(cat spawn.pid)
+          echo "Creating stop file for shutdown..."
+          touch ${{ github.workspace }}/zombie-bite-output/spawn/stop.txt
+          
+          echo "Waiting for process $PID to stop (max 30s)..."
+          for i in {1..30}; do
+            if ! ps -p $PID > /dev/null 2>&1; then
+              echo "Process stopped after ${i}s"
+              rm -f spawn.pid
+              exit 0
+            fi
+            sleep 1
+          done
+          
+          echo "Process did not stop gracefully, sending SIGTERM..."
+          kill $PID 2>/dev/null || true
+          sleep 5
+                    
+          if ps -p $PID > /dev/null 2>&1; then
+            echo "Failed to stop process $PID"
+            exit 1
+          else
+            echo "Process stopped"
+            rm -f spawn.pid
+          fi
