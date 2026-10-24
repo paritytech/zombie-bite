@@ -12,11 +12,11 @@ readme = "README.md"
 include = ["src/**/*.rs", "README.md"]
 
 [dependencies]
-zombienet-sdk = "0.6.0"
-zombienet-provider = "0.6.0"
-zombienet-orchestrator = "0.6.0"
-zombienet-support = "0.6.0"
-zombienet-configuration = "0.6.0"
+zombienet-sdk = "0.7.1"
+zombienet-provider = "0.7.1"
+zombienet-orchestrator = "0.7.1"
+zombienet-support = "0.7.1"
+zombienet-configuration = "0.7.1"
 tokio = "1"
 reqwest = { version = "0.12", features = ["json"] }
 anyhow = "1.0"
