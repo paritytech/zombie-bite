@@ -10,6 +10,13 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+## [6.0.3] - 2026-10-24
+
+### Changed
+
+- Bump the zombienet crates (`zombienet-sdk`, `-orchestrator`, `-provider`,
+  `-support`, `-configuration`), changes in snaps downloading logic in k8s.
+
 ## [0.6.2] - 2026-10-07
 
 ### Fixed
