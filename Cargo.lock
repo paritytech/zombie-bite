@@ -11179,7 +11179,7 @@ dependencies = [
 
 [[package]]
 name = "zombie-bite"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "clap",
@@ -11191,7 +11191,7 @@ dependencies = [
 
 [[package]]
 name = "zombie-bite-core"
-version = "0.6.3"
+version = "0.6.4"
 dependencies = [
  "anyhow",
  "array-bytes",

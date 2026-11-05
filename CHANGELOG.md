@@ -10,7 +10,29 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
-## [6.0.3] - 2026-10-24
+## [0.6.4] - 2026-11-05
+
+### Fixed
+
+- The collator's session keys in a forked parachain now follow the runtime's
+  own `SessionKeys` layout instead of assuming an aura-only key, so a runtime
+  that adds a key (e.g. `authority_discovery` on Asset Hub Westend) no longer
+  produces a collator the session pallet can't rotate in. `Session::QueuedKeys`,
+  `Session::NextKeys` and one `Session::KeyOwner` entry per key are built from
+  the field names in the metadata, each key derived with the scheme zombienet
+  uses for the collator's keystore (on Asset Hub Polkadot, aura stays ed25519
+  while `audi` is sr25519). The keys are then checked with the runtime's
+  `SessionKeys_decode_session_keys`, and an unknown field or a mismatch fails
+  the bite instead of halting block production later ([#159]).
+- `Session::NextKeys` and `Session::KeyOwner` for the collator are now checked
+  against their on-chain types like every other override, instead of being
+  injected as raw storage ([#159]).
+- The collator's `Session::KeyOwner` entry is written under the right storage
+  key on every chain. The hashed key used to be hardcoded for the Polkadot
+  ed25519 collator key, so on sr25519 chains (Kusama, Paseo, Westend) the
+  entry landed where nothing reads it ([#159]).
+
+## [0.6.3] - 2026-10-24
 
 ### Changed
 
@@ -330,7 +352,9 @@ First tagged release.
 - Collator log levels ([#45]).
 - `ZOMBIE_SUDO` to set the sudo key and the `RcMigrator` manager ([#44]).
 
-[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.2...HEAD
+[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.4...HEAD
+[0.6.4]: https://github.com/pepoviola/zombie-bite/compare/v0.6.3...v0.6.4
+[0.6.3]: https://github.com/pepoviola/zombie-bite/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/pepoviola/zombie-bite/compare/v0.6.1...v0.6.2
 [0.6.1]: https://github.com/pepoviola/zombie-bite/compare/v0.6.0...v0.6.1
 [0.6.0]: https://github.com/pepoviola/zombie-bite/compare/v0.4.0...v0.6.0
@@ -414,3 +438,4 @@ First tagged release.
 [#144]: https://github.com/pepoviola/zombie-bite/pull/144
 [#146]: https://github.com/pepoviola/zombie-bite/pull/146
 [#151]: https://github.com/pepoviola/zombie-bite/pull/151
+[#159]: https://github.com/pepoviola/zombie-bite/pull/159
