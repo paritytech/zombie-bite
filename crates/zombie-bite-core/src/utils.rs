@@ -163,30 +163,184 @@ pub fn generate_collator_key_from_seed(seed: &str, key_type: &str) -> String {
     }
 }
 
-/// Generate Session.NextKeys injects for a collator
-/// Returns a JSON object with storage keys mapped to the collator's session keys
-/// The hash is calculated from the collator key bytes
-pub fn generate_collator_next_keys_injects(collator_key: &str) -> serde_json::Value {
-    // Hash the collator key bytes for the storage key prefix
-    let key_bytes = hex::decode(collator_key).expect("collator key should be valid hex");
-    let stash_hash = array_bytes::bytes2hex("", &subhasher::twox64_concat(&key_bytes)[..8]);
+/// Crypto scheme of a key in the node's keystore.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum KeyScheme {
+    Sr,
+    Ed,
+    Ec,
+}
 
-    // Session.NextKeys storage key
-    let session_next_keys = format!(
-        "cec5070d609dd3497f72bde07fc96ba04c014e6bf8b8c2c011e7290b85696bb3{}{}",
-        stash_hash, collator_key
-    );
+/// Scheme zombienet uses when it fills a node's keystore for `type_id`.
+///
+/// This must match zombienet's table (zombienet-orchestrator,
+/// `generators/keystore_key_types.rs`), or the keys we write to state are not
+/// the keys the collator holds.
+pub fn keystore_scheme(type_id: &[u8; 4], is_asset_hub_polkadot: bool) -> KeyScheme {
+    match type_id {
+        b"aura" if is_asset_hub_polkadot => KeyScheme::Ed,
+        b"gran" | b"rate" | b"ftsv" => KeyScheme::Ed,
+        b"beef" => KeyScheme::Ec,
+        _ => KeyScheme::Sr,
+    }
+}
 
-    // Session.KeyOwner storage key for Aura
-    let session_key_owner = format!(
-        "cec5070d609dd3497f72bde07fc96ba0726380404683fc89e8233450c8aa1950eab3d4a1675d3d746175726180{}",
-        collator_key
-    );
-
-    serde_json::json!({
-        session_next_keys: collator_key,
-        session_key_owner: collator_key
+/// `KeyTypeId` of a `SessionKeys` field, by the field name `impl_opaque_keys!`
+/// gives it in the runtime.
+pub fn session_key_type_id(field: &str) -> Option<[u8; 4]> {
+    Some(match field {
+        "aura" => *b"aura",
+        "authority_discovery" => *b"audi",
+        "babe" => *b"babe",
+        "grandpa" => *b"gran",
+        "im_online" => *b"imon",
+        "para_validator" => *b"para",
+        "para_assignment" => *b"asgn",
+        "beefy" => *b"beef",
+        "nimbus" => *b"nmbs",
+        "mixnet" => *b"mixn",
+        _ => return None,
     })
+}
+
+/// One session key of a collator.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollatorKey {
+    pub type_id: [u8; 4],
+    pub public: Vec<u8>,
+}
+
+/// Derive the collator's public key for `type_id` from `//{seed}`, with the
+/// scheme zombienet uses for that key type.
+pub fn collator_key(seed: &str, type_id: [u8; 4], is_asset_hub_polkadot: bool) -> CollatorKey {
+    use sp_core::{ecdsa, ed25519, sr25519, Pair};
+
+    let suri = format!("//{seed}");
+    let public: Vec<u8> = match keystore_scheme(&type_id, is_asset_hub_polkadot) {
+        KeyScheme::Sr => sr25519::Pair::from_string(&suri, None)
+            .expect("sr25519 key from seed")
+            .public()
+            .to_vec(),
+        KeyScheme::Ed => ed25519::Pair::from_string(&suri, None)
+            .expect("ed25519 key from seed")
+            .public()
+            .to_vec(),
+        KeyScheme::Ec => ecdsa::Pair::from_string(&suri, None)
+            .expect("ecdsa key from seed")
+            .public()
+            .to_vec(),
+    };
+    CollatorKey { type_id, public }
+}
+
+/// The session keys of a collator, laid out as the runtime's `SessionKeys`.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CollatorSessionKeys {
+    /// Validator id of the collator (its aura key), the account the session
+    /// pallet maps the keys to.
+    pub account: Vec<u8>,
+    /// One key per `SessionKeys` field, in field order.
+    pub keys: Vec<CollatorKey>,
+}
+
+impl CollatorSessionKeys {
+    /// `fields` are the runtime's `SessionKeys` field names, in order.
+    pub fn new(
+        seed: &str,
+        fields: &[String],
+        is_asset_hub_polkadot: bool,
+    ) -> Result<Self, anyhow::Error> {
+        let keys = fields
+            .iter()
+            .map(|field| {
+                session_key_type_id(field)
+                    .map(|type_id| collator_key(seed, type_id, is_asset_hub_polkadot))
+                    .ok_or_else(|| {
+                        anyhow!("SessionKeys field '{field}' has no known key type, can't build the collator's session keys")
+                    })
+            })
+            .collect::<Result<Vec<_>, _>>()?;
+
+        Ok(Self {
+            account: collator_key(seed, *b"aura", is_asset_hub_polkadot).public,
+            keys,
+        })
+    }
+
+    pub fn account_hex(&self) -> String {
+        hex::encode(&self.account)
+    }
+
+    /// SCALE encoding of `SessionKeys`: the public keys concatenated.
+    pub fn encoded(&self) -> Vec<u8> {
+        self.keys.iter().flat_map(|k| k.public.clone()).collect()
+    }
+
+    /// `Session::QueuedKeys` value: `Vec<(ValidatorId, SessionKeys)>`.
+    pub fn queued_keys_value(&self) -> String {
+        let mut out = codec::Compact(1_u32).encode();
+        out.extend(&self.account);
+        out.extend(self.encoded());
+        hex::encode(out)
+    }
+
+    /// Hashed map key (`Twox64Concat(ValidatorId)`) of `Session::NextKeys`.
+    pub fn next_keys_suffix(&self) -> String {
+        hex::encode(subhasher::twox64_concat(&self.account))
+    }
+
+    /// Hashed map keys (`Twox64Concat((KeyTypeId, Vec<u8>))`) of
+    /// `Session::KeyOwner`, one per session key.
+    pub fn key_owner_suffixes(&self) -> Vec<String> {
+        self.keys
+            .iter()
+            .map(|k| {
+                hex::encode(subhasher::twox64_concat(
+                    (k.type_id, k.public.clone()).encode(),
+                ))
+            })
+            .collect()
+    }
+
+    /// Check the keys against what the runtime's
+    /// `SessionKeys_decode_session_keys` made of `encoded()`: it must decode,
+    /// and yield the same keys with the same key types in the same order.
+    pub fn check_decoded(
+        &self,
+        decoded: Option<Vec<(Vec<u8>, [u8; 4])>>,
+    ) -> Result<(), anyhow::Error> {
+        let decoded = decoded.ok_or_else(|| {
+            anyhow!(
+                "the runtime can't decode the collator's session keys (0x{}), the SessionKeys layout is not what the bite expects",
+                hex::encode(self.encoded())
+            )
+        })?;
+        let ours: Vec<(Vec<u8>, [u8; 4])> = self
+            .keys
+            .iter()
+            .map(|k| (k.public.clone(), k.type_id))
+            .collect();
+        if decoded != ours {
+            let show = |keys: &[(Vec<u8>, [u8; 4])]| {
+                keys.iter()
+                    .map(|(public, type_id)| {
+                        format!(
+                            "{}=0x{}",
+                            String::from_utf8_lossy(type_id),
+                            hex::encode(public)
+                        )
+                    })
+                    .collect::<Vec<_>>()
+                    .join(", ")
+            };
+            anyhow::bail!(
+                "the runtime decodes the collator's session keys as [{}], the bite built [{}]",
+                show(&decoded),
+                show(&ours)
+            );
+        }
+        Ok(())
+    }
 }
 
 /// Parachain id.
@@ -541,70 +695,128 @@ mod test {
         println!("Collator key (ed25519/Polkadot): {}", collator_key_ed);
     }
 
-    #[tokio::test]
-    async fn test_generate_collator_injects_for_polkadot() {
-        // Test Polkadot (ed25519)
-        let polkadot_key = generate_collator_key_from_seed("Collator", "ed");
-        let injects = generate_collator_next_keys_injects(&polkadot_key);
-
-        // Expected key for Polkadot with "Collator" seed (ed25519)
-        assert_eq!(
-            polkadot_key,
-            "eb2f4b5e6f0bfa7ba42aa4b7eb2f43ba6c42061dbfc765bca066e51bb09f9116"
-        );
-
-        // Verify injects structure
-        assert!(injects.is_object());
-        let obj = injects.as_object().unwrap();
-        assert_eq!(obj.len(), 2);
-
-        // Both storage entries should map to the collator key
-        for (storage_key, value) in obj.iter() {
-            assert!(storage_key.starts_with("cec5070d609dd3497f72bde07fc96ba0"));
-            assert_eq!(value.as_str().unwrap(), polkadot_key);
-        }
-
-        let expected_injects = json!({
-            // Session Nextkeys for `collator` (hash is from Polkadot ed25519 key bytes)
-            "cec5070d609dd3497f72bde07fc96ba04c014e6bf8b8c2c011e7290b85696bb39d822490da82ebc3eb2f4b5e6f0bfa7ba42aa4b7eb2f43ba6c42061dbfc765bca066e51bb09f9116": "eb2f4b5e6f0bfa7ba42aa4b7eb2f43ba6c42061dbfc765bca066e51bb09f9116",
-            // Session KeyOwner
-            "cec5070d609dd3497f72bde07fc96ba0726380404683fc89e8233450c8aa1950eab3d4a1675d3d746175726180eb2f4b5e6f0bfa7ba42aa4b7eb2f43ba6c42061dbfc765bca066e51bb09f9116": "eb2f4b5e6f0bfa7ba42aa4b7eb2f43ba6c42061dbfc765bca066e51bb09f9116",
-        });
-
-        assert_eq!(injects, expected_injects);
+    fn fields(names: &[&str]) -> Vec<String> {
+        names.iter().map(|n| n.to_string()).collect()
     }
 
-    #[tokio::test]
-    async fn test_generate_collator_injects_for_kusama() {
-        // Test Kusama (sr25519)
-        let kusama_key = generate_collator_key_from_seed("Collator", "sr");
-        let injects = generate_collator_next_keys_injects(&kusama_key);
+    const NEXT_KEYS: &str = "cec5070d609dd3497f72bde07fc96ba04c014e6bf8b8c2c011e7290b85696bb3";
+    const KEY_OWNER: &str = "cec5070d609dd3497f72bde07fc96ba0726380404683fc89e8233450c8aa1950";
+    // "Collator" seed, as zombienet derives it
+    const COLLATOR_ED: &str = "eb2f4b5e6f0bfa7ba42aa4b7eb2f43ba6c42061dbfc765bca066e51bb09f9116";
+    const COLLATOR_SR: &str = "005025ef7c9934c33534cbff35c9c5f0c1d30128e64f076c76942f49788eec15";
 
-        // Expected key for Kusama with "Collator" seed
+    #[test]
+    fn aura_only_collator_keys_for_polkadot_are_unchanged() {
+        let keys = CollatorSessionKeys::new("Collator", &fields(&["aura"]), true).unwrap();
+
+        assert_eq!(keys.account_hex(), COLLATOR_ED);
+        assert_eq!(hex::encode(keys.encoded()), COLLATOR_ED);
         assert_eq!(
-            kusama_key,
-            "005025ef7c9934c33534cbff35c9c5f0c1d30128e64f076c76942f49788eec15"
+            keys.queued_keys_value(),
+            format!("04{COLLATOR_ED}{COLLATOR_ED}")
+        );
+        // Same storage keys the hand-rolled injects used to produce
+        assert_eq!(
+            format!("{NEXT_KEYS}{}", keys.next_keys_suffix()),
+            format!("{NEXT_KEYS}9d822490da82ebc3{COLLATOR_ED}")
+        );
+        assert_eq!(
+            keys.key_owner_suffixes()
+                .iter()
+                .map(|s| format!("{KEY_OWNER}{s}"))
+                .collect::<Vec<_>>(),
+            vec![format!(
+                "{KEY_OWNER}eab3d4a1675d3d746175726180{COLLATOR_ED}"
+            )]
+        );
+    }
+
+    #[test]
+    fn aura_only_collator_keys_for_kusama_are_unchanged() {
+        let keys = CollatorSessionKeys::new("Collator", &fields(&["aura"]), false).unwrap();
+
+        assert_eq!(keys.account_hex(), COLLATOR_SR);
+        assert_eq!(hex::encode(keys.encoded()), COLLATOR_SR);
+        assert_eq!(
+            keys.next_keys_suffix(),
+            format!("9af53646681828f1{COLLATOR_SR}")
+        );
+        // The old hand-rolled inject reused the twox64 prefix of the Polkadot
+        // ed25519 key (eab3d4a1675d3d74) for every collator, so on sr25519
+        // chains the KeyOwner entry landed under a key nothing reads.
+        assert_eq!(
+            keys.key_owner_suffixes(),
+            vec![format!("227001a8a2a99ae66175726180{COLLATOR_SR}")]
+        );
+    }
+
+    #[test]
+    fn asset_hub_polkadot_collator_gets_an_sr25519_authority_discovery_key() {
+        let keys =
+            CollatorSessionKeys::new("Collator", &fields(&["aura", "authority_discovery"]), true)
+                .unwrap();
+
+        // aura stays ed25519 (and the account), audi is always sr25519
+        assert_eq!(keys.account_hex(), COLLATOR_ED);
+        assert_eq!(
+            keys.keys,
+            vec![
+                CollatorKey {
+                    type_id: *b"aura",
+                    public: hex::decode(COLLATOR_ED).unwrap()
+                },
+                CollatorKey {
+                    type_id: *b"audi",
+                    public: hex::decode(COLLATOR_SR).unwrap()
+                },
+            ]
+        );
+        assert_eq!(
+            hex::encode(keys.encoded()),
+            format!("{COLLATOR_ED}{COLLATOR_SR}")
+        );
+        assert_eq!(
+            keys.queued_keys_value(),
+            format!("04{COLLATOR_ED}{COLLATOR_ED}{COLLATOR_SR}")
+        );
+        // NextKeys is keyed by the account, not by every key
+        assert_eq!(
+            keys.next_keys_suffix(),
+            format!("9d822490da82ebc3{COLLATOR_ED}")
         );
 
-        // Verify injects structure
-        assert!(injects.is_object());
-        let obj = injects.as_object().unwrap();
-        assert_eq!(obj.len(), 2);
+        // One KeyOwner entry per key: (KeyTypeId, Vec<u8>)
+        let owners = keys.key_owner_suffixes();
+        assert_eq!(owners.len(), 2);
+        assert!(owners[0].ends_with(&format!("6175726180{COLLATOR_ED}")));
+        assert!(owners[1].ends_with(&format!("6175646980{COLLATOR_SR}")));
+    }
 
-        // Both storage entries should map to the Collator key
-        for (storage_key, value) in obj.iter() {
-            assert!(storage_key.starts_with("cec5070d609dd3497f72bde07fc96ba0"));
-            assert_eq!(value.as_str().unwrap(), kusama_key);
-        }
+    #[test]
+    fn unknown_session_key_field_fails() {
+        let err = CollatorSessionKeys::new("Collator", &fields(&["aura", "foo"]), false)
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("'foo'"), "got: {err}");
+    }
 
-        let expected_injects = json!({
-            // Session Nextkeys for `Collator`
-            "cec5070d609dd3497f72bde07fc96ba04c014e6bf8b8c2c011e7290b85696bb39af53646681828f1005025ef7c9934c33534cbff35c9c5f0c1d30128e64f076c76942f49788eec15": "005025ef7c9934c33534cbff35c9c5f0c1d30128e64f076c76942f49788eec15",
+    #[test]
+    fn check_decoded_requires_the_runtime_to_agree() {
+        let keys =
+            CollatorSessionKeys::new("Collator", &fields(&["aura", "authority_discovery"]), true)
+                .unwrap();
+        let aura = (hex::decode(COLLATOR_ED).unwrap(), *b"aura");
+        let audi = (hex::decode(COLLATOR_SR).unwrap(), *b"audi");
 
-            // Session KeyOwner
-            "cec5070d609dd3497f72bde07fc96ba0726380404683fc89e8233450c8aa1950eab3d4a1675d3d746175726180005025ef7c9934c33534cbff35c9c5f0c1d30128e64f076c76942f49788eec15": "005025ef7c9934c33534cbff35c9c5f0c1d30128e64f076c76942f49788eec15",
-        });
-
-        assert_eq!(injects, expected_injects);
+        keys.check_decoded(Some(vec![aura.clone(), audi.clone()]))
+            .unwrap();
+        // runtime can't decode it (wrong length)
+        assert!(keys.check_decoded(None).is_err());
+        // runtime has a different field order / key type
+        let err = keys
+            .check_decoded(Some(vec![audi, aura]))
+            .unwrap_err()
+            .to_string();
+        assert!(err.contains("audi="), "got: {err}");
     }
 }
