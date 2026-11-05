@@ -7,10 +7,7 @@ use tracing::{info, warn};
 use crate::{
     config::{get_assigned_cores, CoresOverride, Parachain, Relaychain},
     metadata::{nested_mut, set_field, storage_key, ChainMetadata, RuntimeCheck},
-    utils::{
-        generate_collator_key_from_seed, generate_collator_next_keys_injects, get_validator_keys,
-        ParaId, ValidationCode,
-    },
+    utils::{get_validator_keys, CollatorSessionKeys, ParaId, ValidationCode},
 };
 
 use zombienet_sdk::generators::core_assignment;
@@ -674,24 +671,13 @@ pub async fn generate_default_overrides_for_para(
     meta: Option<&ChainMetadata>,
     keep_messaging_state: bool,
 ) -> Result<PathBuf, anyhow::Error> {
-    // For AH determine key type based on relay chain: ed25519 for Polkadot, sr25519 for others
-    let key_type = match (relay, para) {
-        (Relaychain::Polkadot { .. }, Parachain::AssetHub { .. }) => "ed",
-        _ => "sr",
-    };
-
-    // Generate collator key using "Collator-{para_id}" as seed
-    let seed = format!("Collator-{}", para.id());
-    let key_to_use = generate_collator_key_from_seed(&seed, key_type);
+    let session_keys = collator_session_keys(para, relay, meta).await?;
+    let key_to_use = session_keys.account_hex();
 
     let mut set = OverrideSet::new(meta.map(|m| m as &dyn RuntimeCheck));
 
     set.set("Session", "Validators", format!("04{key_to_use}"));
-    set.set(
-        "Session",
-        "QueuedKeys",
-        format!("04{key_to_use}{key_to_use}"),
-    );
+    set.set("Session", "QueuedKeys", session_keys.queued_keys_value());
     set.set(
         "CollatorSelection",
         "Invulnerables",
@@ -714,15 +700,15 @@ pub async fn generate_default_overrides_for_para(
         );
     }
 
-    // Session.NextKeys for the collator
-    for (key, value) in generate_collator_next_keys_injects(&key_to_use)
-        .as_object()
-        .expect("collator injects should be a map")
-    {
-        set.inject_raw(
-            key,
-            value.as_str().expect("collator inject should be a string"),
-        );
+    // Session.NextKeys and one Session.KeyOwner entry per key for the collator
+    set.inject_map(
+        "Session",
+        "NextKeys",
+        &session_keys.next_keys_suffix(),
+        hex::encode(session_keys.encoded()),
+    );
+    for suffix in session_keys.key_owner_suffixes() {
+        set.inject_map("Session", "KeyOwner", &suffix, &key_to_use);
     }
 
     if let Some(override_wasm) = para.wasm_overrides() {
@@ -746,6 +732,64 @@ pub async fn generate_default_overrides_for_para(
         .await
         .expect("write file should works.");
     Ok(file_path)
+}
+
+/// Session keys of the para's collator, laid out as the runtime's
+/// `SessionKeys` (e.g. `{ aura, authority_discovery }` on Asset Hub).
+///
+/// The layout is read from the runtime's metadata and the result is checked
+/// with the runtime's own `SessionKeys_decode_session_keys`, so a runtime that
+/// adds, removes or reorders a session key fails the bite here instead of
+/// producing a collator the session pallet can't rotate in. Without metadata
+/// the collator only gets an aura key.
+async fn collator_session_keys(
+    para: &Parachain,
+    relay: &Relaychain,
+    meta: Option<&ChainMetadata>,
+) -> Result<CollatorSessionKeys, anyhow::Error> {
+    // Asset Hub Polkadot uses ed25519 aura keys (as zombienet does for its keystore)
+    let is_asset_hub_polkadot = matches!(
+        (relay, para),
+        (Relaychain::Polkadot { .. }, Parachain::AssetHub { .. })
+    );
+    // zombienet derives the keystore of `collator-{id}` from `//Collator-{id}`
+    let seed = format!("Collator-{}", para.id());
+
+    let fields = match meta.map(|m| m.session_key_fields()).transpose()? {
+        Some(Some(fields)) => fields,
+        Some(None) => {
+            warn!(
+                "para {}: runtime has no Session pallet, using aura-only collator keys",
+                para.id()
+            );
+            vec!["aura".to_string()]
+        }
+        None => vec!["aura".to_string()],
+    };
+
+    let keys = CollatorSessionKeys::new(&seed, &fields, is_asset_hub_polkadot)
+        .map_err(|e| anyhow::anyhow!("para {}: {e}", para.id()))?;
+
+    if let Some(meta) = meta {
+        let decoded = meta
+            .decode_session_keys(&keys.encoded())
+            .await
+            .map_err(|e| {
+                anyhow::anyhow!(
+                    "para {}: can't check the collator's session keys against the runtime: {e}",
+                    para.id()
+                )
+            })?;
+        keys.check_decoded(decoded)
+            .map_err(|e| anyhow::anyhow!("para {}: {e}", para.id()))?;
+        info!(
+            "para {}: collator session keys [{}] checked against the runtime",
+            para.id(),
+            fields.join(", ")
+        );
+    }
+
+    Ok(keys)
 }
 
 fn generate_paras_parachains_value(ids: impl Into<Vec<u32>>) -> String {
@@ -980,6 +1024,30 @@ mod test {
             set.injects[storage_key("System", "AuthorizedUpgrade")],
             json!(expected)
         );
+    }
+
+    /// Hits the live Asset Hub RPCs: the SessionKeys layout is read from
+    /// metadata and the keys we build must decode the same way in the runtime.
+    #[tokio::test]
+    #[ignore = "needs network access to the public RPCs"]
+    async fn collator_session_keys_match_live_asset_hubs() {
+        for relay in ["polkadot", "kusama"] {
+            let rc = Relaychain::new(relay);
+            let para = crate::config::Parachain::new("asset-hub");
+            let url = para.default_rpc_endpoint(&rc).expect("default endpoint");
+            let meta = ChainMetadata::fetch(relay, &url, None)
+                .await
+                .expect("metadata from the live chain");
+
+            let fields = meta.session_key_fields().unwrap().expect("Session pallet");
+            let keys = collator_session_keys(&para, &rc, Some(&meta))
+                .await
+                .unwrap_or_else(|e| panic!("{relay}: {e}"));
+            println!(
+                "{relay} asset-hub SessionKeys {fields:?} -> 0x{}",
+                hex::encode(keys.encoded())
+            );
+        }
     }
 
     /// Runtime check stub: `present` lists the items the runtime has, and any

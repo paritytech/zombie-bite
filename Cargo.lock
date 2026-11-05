@@ -11201,6 +11201,7 @@ dependencies = [
  "hex",
  "parity-scale-codec",
  "reqwest",
+ "scale-info",
  "scale-value 0.16.3",
  "serde",
  "serde_json",

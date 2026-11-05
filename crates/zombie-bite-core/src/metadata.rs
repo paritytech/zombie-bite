@@ -125,6 +125,54 @@ impl ChainMetadata {
         Ok(())
     }
 
+    /// Field names of the runtime's `SessionKeys`, in encoding order (e.g.
+    /// `["aura", "authority_discovery"]`), read from the value type of
+    /// `Session::NextKeys`. `None` when the runtime has no session pallet.
+    pub fn session_key_fields(&self) -> Result<Option<Vec<String>>, anyhow::Error> {
+        let Some(ty) = self.value_ty("Session", "NextKeys") else {
+            return Ok(None);
+        };
+        let resolved = self
+            .metadata
+            .types()
+            .resolve(ty)
+            .ok_or_else(|| anyhow!("Session::NextKeys: type {ty} is not in the registry"))?;
+        let scale_info::TypeDef::Composite(composite) = &resolved.type_def else {
+            bail!("Session::NextKeys: SessionKeys is not a struct, can't read its fields");
+        };
+        composite
+            .fields
+            .iter()
+            .map(|f| {
+                f.name
+                    .clone()
+                    .ok_or_else(|| anyhow!("Session::NextKeys: SessionKeys has unnamed fields"))
+            })
+            .collect::<Result<Vec<_>, _>>()
+            .map(Some)
+    }
+
+    /// Ask the runtime (`SessionKeys_decode_session_keys`, at the same block
+    /// the metadata came from) how it decodes `encoded` session keys: the raw
+    /// public keys with their `KeyTypeId`, or `None` when they don't decode.
+    pub async fn decode_session_keys(
+        &self,
+        encoded: &[u8],
+    ) -> Result<Option<Vec<(Vec<u8>, [u8; 4])>>, anyhow::Error> {
+        use zombienet_sdk::subxt::ext::codec::{Decode, Encode};
+
+        let mut params = RpcParams::new();
+        params.push("SessionKeys_decode_session_keys")?;
+        params.push(format!("0x{}", hex::encode(encoded.to_vec().encode())))?;
+        if let Some(at) = &self.at {
+            params.push(at)?;
+        }
+        let raw: String = self.rpc.request("state_call", params).await?;
+        let bytes = hex::decode(raw.trim_start_matches("0x"))?;
+        Option::<Vec<(Vec<u8>, [u8; 4])>>::decode(&mut &bytes[..])
+            .map_err(|e| anyhow!("SessionKeys_decode_session_keys: can't decode the result: {e}"))
+    }
+
     /// Read a live storage value as hex (no `0x` prefix), at the same block the
     /// metadata came from.
     pub async fn storage_value(&self, key: &str) -> Result<Option<String>, anyhow::Error> {
