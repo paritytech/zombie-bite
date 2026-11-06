@@ -397,7 +397,9 @@ fn generate_rc_overrides(
     // Stock runtimes have no `:UsePreviousValidators:` hook, so without this the
     // first session rotation re-elects the production validators - whose
     // Session::NextKeys the bite has just replaced - and authoring halts an
-    // epoch in. Forcing::ForceNone keeps the dev set elected.
+    // epoch in. Forcing::ForceNone keeps the dev set elected. That only holds
+    // while staking runs on the relay chain: once it moved to Asset Hub, the
+    // set is frozen by `freeze_ah_client` and Asset Hub's own ForceEra.
     set.inject("Staking", "ForceEra", "02");
     set.set(
         "ParasShared",
@@ -611,6 +613,8 @@ pub async fn generate_default_overrides_for_rc(
         "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
     );
 
+    freeze_ah_client(&mut set, meta).await?;
+
     // update the overrides / injects map to use IFF the key is provided
     if let Ok(sudo_key) = env::var("ZOMBIE_SUDO") {
         set.set_required("Sudo", "Key", &sudo_key);
@@ -692,6 +696,12 @@ pub async fn generate_default_overrides_for_para(
         "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
     );
 
+    if matches!(para, Parachain::AssetHub { .. }) {
+        // Staking runs on Asset Hub: never plan a new era, so no election is
+        // started and no validator set is sent to the relay chain.
+        set.inject("Staking", "ForceEra", force_none(meta)?);
+    }
+
     if !keep_messaging_state {
         set.set(
             "ParachainSystem",
@@ -732,6 +742,77 @@ pub async fn generate_default_overrides_for_para(
         .await
         .expect("write file should works.");
     Ok(file_path)
+}
+
+/// Encoding of a fieldless variant of an item's enum, taken from the
+/// runtime's own type.
+fn enum_variant(
+    meta: &ChainMetadata,
+    pallet: &str,
+    item: &str,
+    variant: &str,
+) -> Result<String, anyhow::Error> {
+    let value = ScaleValue::unnamed_variant(variant, []).map_context(|_| 0_u32);
+    meta.encode_value(pallet, item, &value)
+}
+
+/// `Forcing::ForceNone` for `Staking::ForceEra`.
+fn force_none(meta: Option<&ChainMetadata>) -> Result<String, anyhow::Error> {
+    match meta {
+        Some(meta) if meta.has_item("Staking", "ForceEra") => {
+            enum_variant(meta, "Staking", "ForceEra", "ForceNone")
+        }
+        // index 2 in both pallet-staking and pallet-staking-async
+        _ => Ok("02".to_string()),
+    }
+}
+
+/// The `StakingAhClient::Mode` to write, given its live value: `Active`
+/// becomes `Buffered`, anything else is left as it is.
+fn ah_client_mode_override(live: &str, active: &str, buffered: &str) -> Option<String> {
+    (live == active).then(|| buffered.to_string())
+}
+
+/// Keep the dev validator set on a relay chain whose staking runs on Asset
+/// Hub.
+///
+/// In `Active` mode `StakingAhClient` hands the session pallet whatever
+/// validator set Asset Hub elected, which replaces the dev validators (whose
+/// keys the bite wrote) and halts the fork. `Buffered` keeps the current set
+/// on every session change, rejects incoming validator sets and drops the
+/// session reports that drive Asset Hub's eras, so no election runs either.
+///
+/// Only `Active` is switched: a relay chain still in `Passive` mode has not
+/// migrated staking to Asset Hub (an AHM dry-run), and the migration itself
+/// sets the mode.
+async fn freeze_ah_client(
+    set: &mut OverrideSet<'_>,
+    meta: Option<&ChainMetadata>,
+) -> Result<(), anyhow::Error> {
+    let Some(meta) = meta else {
+        warn!("relay: no metadata, can't tell whether StakingAhClient is active - an election on Asset Hub may replace the dev validator set");
+        return Ok(());
+    };
+    if !meta.has_item("StakingAhClient", "Mode") {
+        return Ok(());
+    }
+
+    let active = enum_variant(meta, "StakingAhClient", "Mode", "Active")?;
+    let buffered = enum_variant(meta, "StakingAhClient", "Mode", "Buffered")?;
+    // ValueQuery: a missing value is the default, `Passive`
+    let live = meta
+        .storage_value(&storage_key("StakingAhClient", "Mode"))
+        .await?
+        .unwrap_or_default();
+
+    match ah_client_mode_override(&live, &active, &buffered) {
+        Some(mode) => {
+            info!("relay: StakingAhClient::Mode Active -> Buffered, the dev validator set stays in place");
+            set.set("StakingAhClient", "Mode", mode);
+        }
+        None => info!("relay: StakingAhClient::Mode is 0x{live}, not Active, leaving it"),
+    }
+    Ok(())
 }
 
 /// Session keys of the para's collator, laid out as the runtime's
@@ -1024,6 +1105,59 @@ mod test {
             set.injects[storage_key("System", "AuthorizedUpgrade")],
             json!(expected)
         );
+    }
+
+    #[test]
+    fn only_an_active_ah_client_is_buffered() {
+        assert_eq!(ah_client_mode_override("02", "02", "01"), Some("01".into()));
+        // Passive (pre-AHM), stored or default, and Buffered are left alone
+        assert_eq!(ah_client_mode_override("00", "02", "01"), None);
+        assert_eq!(ah_client_mode_override("", "02", "01"), None);
+        assert_eq!(ah_client_mode_override("01", "02", "01"), None);
+    }
+
+    #[tokio::test]
+    async fn asset_hub_gets_force_none_and_other_paras_do_not() {
+        let rc = Relaychain::new("polkadot");
+        let force_era = storage_key("Staking", "ForceEra");
+        let dir = "/tmp/zombie-bite-test-force-era";
+        tokio::fs::create_dir_all(dir).await.unwrap();
+
+        for (name, expected) in [("asset-hub", Some("02")), ("coretime", None)] {
+            let para = crate::config::Parachain::new(name);
+            let path = generate_default_overrides_for_para(dir, &para, &rc, None, None, false)
+                .await
+                .unwrap();
+            let content: Value =
+                serde_json::from_str(&tokio::fs::read_to_string(path).await.unwrap()).unwrap();
+            assert_eq!(content["injects"][&force_era].as_str(), expected, "{name}");
+        }
+    }
+
+    /// Hits the live relay RPCs: every relay chain whose staking moved to
+    /// Asset Hub is in `Active` mode, so the bite must switch it to `Buffered`.
+    #[tokio::test]
+    #[ignore = "needs network access to the public RPCs"]
+    async fn live_active_ah_client_is_switched_to_buffered() {
+        for relay in ["polkadot", "kusama"] {
+            let rc = Relaychain::new(relay);
+            let url = rc.rpc_endpoint();
+            let meta = ChainMetadata::fetch(relay, &url, None)
+                .await
+                .expect("metadata");
+
+            let mut set = OverrideSet::new(Some(&meta));
+            freeze_ah_client(&mut set, Some(&meta)).await.unwrap();
+
+            let buffered = enum_variant(&meta, "StakingAhClient", "Mode", "Buffered").unwrap();
+            assert_eq!(buffered, "01");
+            assert_eq!(
+                set.overrides[storage_key("StakingAhClient", "Mode")],
+                json!(buffered),
+                "{relay}"
+            );
+            assert_eq!(force_none(Some(&meta)).unwrap(), "02");
+        }
     }
 
     /// Hits the live Asset Hub RPCs: the SessionKeys layout is read from
