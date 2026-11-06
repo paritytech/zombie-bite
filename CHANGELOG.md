@@ -10,6 +10,18 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+### Fixed
+
+- A fork of a relay chain whose staking runs on Asset Hub no longer swaps out
+  its dev validators. When `StakingAhClient::Mode` is `Active` (Polkadot,
+  Kusama, Paseo and Westend today), the bite switches it to `Buffered`: the
+  session pallet keeps the current validators, validator sets sent from Asset
+  Hub are rejected, and no session reports reach Asset Hub, so its eras stop
+  advancing. A relay chain still in `Passive` mode (before the Asset Hub
+  migration) is left alone. Asset Hub also gets `Staking::ForceEra =
+  ForceNone`, so it never plans an era or starts an election. The enum values
+  are encoded from the runtime's own types.
+
 ## [0.6.4] - 2026-11-05
 
 ### Fixed
