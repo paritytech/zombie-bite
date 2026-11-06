@@ -10,6 +10,8 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+## [0.6.5] - 2026-11-06
+
 ### Fixed
 
 - A fork of a relay chain whose staking runs on Asset Hub no longer swaps out
@@ -20,7 +22,7 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
   advancing. A relay chain still in `Passive` mode (before the Asset Hub
   migration) is left alone. Asset Hub also gets `Staking::ForceEra =
   ForceNone`, so it never plans an era or starts an election. The enum values
-  are encoded from the runtime's own types.
+  are encoded from the runtime's own types ([#161]).
 
 ## [0.6.4] - 2026-11-05
 
@@ -364,7 +366,8 @@ First tagged release.
 - Collator log levels ([#45]).
 - `ZOMBIE_SUDO` to set the sudo key and the `RcMigrator` manager ([#44]).
 
-[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.4...HEAD
+[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.5...HEAD
+[0.6.5]: https://github.com/pepoviola/zombie-bite/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/pepoviola/zombie-bite/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/pepoviola/zombie-bite/compare/v0.6.2...v0.6.3
 [0.6.2]: https://github.com/pepoviola/zombie-bite/compare/v0.6.1...v0.6.2
@@ -451,3 +454,4 @@ First tagged release.
 [#146]: https://github.com/pepoviola/zombie-bite/pull/146
 [#151]: https://github.com/pepoviola/zombie-bite/pull/151
 [#159]: https://github.com/pepoviola/zombie-bite/pull/159
+[#161]: https://github.com/pepoviola/zombie-bite/pull/161
