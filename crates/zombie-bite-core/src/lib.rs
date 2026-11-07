@@ -5,6 +5,7 @@ pub mod config;
 pub mod manifest;
 pub mod network;
 pub mod resolve;
+pub mod stack;
 pub mod upgrade;
 pub mod verify;
 

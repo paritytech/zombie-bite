@@ -23,7 +23,12 @@ pub enum Commands {
         /// The network to bite: polkadot, kusama, paseo or westend.
         /// For a relay that is not a public network use:
         /// custom%<name>%<rpc_endpoint>%<chain_spec_path>
-        #[arg(short = 'r', long = "rc", verbatim_doc_comment)]
+        #[arg(
+            short = 'r',
+            long = "rc",
+            conflicts_with = "stack",
+            verbatim_doc_comment
+        )]
         relay: Option<String>,
         /// If provided we will override the runtime as part of the process of 'bite'
         /// The resulting network will be running with this runtime.
@@ -66,13 +71,19 @@ pub enum Commands {
         /// Parachains to include: asset-hub, coretime, people, bridge-hub, collectives (comma-separated)
         /// For custom parachains use: custom%<para_id>%<rpc_endpoint>%<chain_spec_path>%[req_cores]
         /// Example: custom:3392:wss://kusama-yap-3392.example.com:/path/to/chain-spec.json
-        #[arg(long, short = 'p', value_delimiter = ',', verbatim_doc_comment)]
+        #[arg(
+            long,
+            short = 'p',
+            value_delimiter = ',',
+            conflicts_with = "stack",
+            verbatim_doc_comment
+        )]
         parachains: Option<Vec<String>>,
         /// Base path to use. if not provided we will check the env 'ZOMBIE_BITE_BASE_PATH' and if not present we will use `<cwd>_timestamp`
         #[arg(long, short = 'd', verbatim_doc_comment)]
         base_path: Option<String>,
         /// sync url to use when we bite the parachain.
-        #[arg(long = "rc-sync-url", verbatim_doc_comment)]
+        #[arg(long = "rc-sync-url", conflicts_with = "stack", verbatim_doc_comment)]
         rc_sync_url: Option<String>,
         /// Automatically spawn the 'bited' network
         #[arg(long, short = 'm', default_value_t = false, verbatim_doc_comment)]
@@ -93,6 +104,29 @@ pub enum Commands {
         /// and if not there, `doppelganger-parachain` from PATH.
         #[arg(long, verbatim_doc_comment)]
         doppelganger_parachain: Option<String>,
+        #[command(flatten)]
+        stack: StackArgs,
+    },
+    /// Print the config derived from a Trinity stack descriptor, without biting.
+    /// The chain-specs are downloaded to '<base_path>/stack' and each para's
+    /// cores are read from the relay, as 'bite --stack' does.
+    StackConfig {
+        /// Configuration file whose [relaychain] / [[parachains]] (matched by
+        /// 'role' or 'id') override the stack's chains.
+        #[arg(long, short = 'c', verbatim_doc_comment)]
+        config: Option<String>,
+        #[command(flatten)]
+        stack: StackArgs,
+        /// Base path to download the chain-specs to.
+        /// if not provided we will check the env 'ZOMBIE_BITE_BASE_PATH' and if not present we will use `<cwd>_timestamp`
+        #[arg(long, short = 'd', verbatim_doc_comment)]
+        base_path: Option<String>,
+        /// Read the core assignments at this relay block instead of at head.
+        #[arg(long = "rc-bite-at", verbatim_doc_comment)]
+        relay_bite_at: Option<u32>,
+        /// Write the config to this file instead of stdout.
+        #[arg(long, short = 'o', verbatim_doc_comment)]
+        out: Option<String>,
     },
     /// Spawn a new instance of the network from the bite step.
     Spawn {
@@ -162,4 +196,23 @@ pub enum Commands {
         #[arg(short = 's', value_parser = clap::builder::PossibleValuesParser::new(["bite", "spawn", "post"]), default_value="bite")]
         step: String,
     },
+}
+
+/// Where to read a Trinity stack from.
+#[derive(clap::Args, Debug, Clone, Default)]
+pub struct StackArgs {
+    /// Trinity stack to bite, instead of --rc / --parachains: a descriptor url,
+    /// a local file or a 'polkadotapp://stack?url=...&key=...' link.
+    /// The relay and parachains, their endpoints and chain-specs come from the
+    /// descriptor, and each para's cores from the relay.
+    #[arg(long, verbatim_doc_comment)]
+    pub stack: Option<String>,
+    /// Operator's Ed25519 public key (0x-prefixed hex) to check the stack
+    /// descriptor's signature with, for a url or file that does not carry one.
+    #[arg(long, requires = "stack", verbatim_doc_comment)]
+    pub stack_key: Option<String>,
+    /// Roles of the stack's chains to bite, comma-separated (e.g. AssetHub,People).
+    /// The relay is always bitten. Defaults to every chain of the stack.
+    #[arg(long, value_delimiter = ',', requires = "stack", verbatim_doc_comment)]
+    pub stack_chains: Option<Vec<String>>,
 }

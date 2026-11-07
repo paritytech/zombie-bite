@@ -1,0 +1,21 @@
+# Bite a Trinity stack: the relay and parachains come from its descriptor.
+[stack]
+# descriptor url, local file or polkadotapp://stack?url=...&key=... link
+pointer = "https://previewnet.substrate.dev/.well-known/trinity-stack.json"
+# operator key to check the signature with, when the pointer has none
+# key = "0x..."
+# chains to bite (the relay is always bitten); all of them when unset
+# chains = ["AssetHub", "People"]
+
+# With a stack, [relaychain] and [[parachains]] only override its chains.
+[relaychain]
+# command = "./bins/polkadot"
+
+[[parachains]]
+type = "custom"
+role = "AssetHub"
+# cores = 2                          # defaults to the cores it has on the relay
+# command = "polkadot-omni-node"
+# runtime_override = "/path/to/asset_hub_runtime.wasm"
+
+# and_spawn = true

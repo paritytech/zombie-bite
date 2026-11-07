@@ -268,6 +268,8 @@ pub struct BiteOptions {
     /// Which `doppelganger` binaries sync the live chains and build their
     /// chain-specs.
     pub doppelganger: DoppelgangerSetup,
+    /// The Trinity stack the chains come from, recorded in the manifest.
+    pub stack: Option<crate::stack::StackSource>,
 }
 
 /// The `doppelganger` binaries the *bite* step runs, as opposed to
@@ -625,6 +627,10 @@ pub enum Parachain {
         id: u32,
         cores: u32,
         name: String,
+        /// Role of the chain in its stack (e.g. `AssetHub`), when known. Lets a
+        /// system chain that runs under a non-standard para id (a Trinity
+        /// stack's Asset Hub on 1500) keep its role-specific overrides.
+        role: Option<String>,
     },
 }
 
@@ -660,6 +666,7 @@ impl Parachain {
                 chain_spec: chain.to_string(),
                 id: 2000, // placeholder
                 cores: 1, // placeholder
+                role: None,
             },
         }
     }
@@ -796,7 +803,20 @@ impl Parachain {
     pub fn is_custom(&self) -> bool {
         matches!(self, Parachain::Custom { .. })
     }
+
+    /// Asset Hub, whether it is the built-in one or a custom para whose stack
+    /// gives it the `AssetHub` role.
+    pub fn is_asset_hub(&self) -> bool {
+        match self {
+            Parachain::AssetHub { .. } => true,
+            Parachain::Custom { role, .. } => role.as_deref() == Some(ROLE_ASSET_HUB),
+            _ => false,
+        }
+    }
 }
+
+/// Role name Trinity stack descriptors (RFC 0026 roles) give Asset Hub.
+pub const ROLE_ASSET_HUB: &str = "AssetHub";
 
 // Chain generator command template
 const CMD_TPL: &str = "chain-spec-generator {{chainName}}";
@@ -967,6 +987,23 @@ pub struct ZombieBiteConfig {
     pub publish_bootnodes: Option<String>,
     /// The `doppelganger` binaries the bite step runs.
     pub doppelganger: Option<DoppelgangerConfig>,
+    /// Trinity stack to bite. When set, the relay and parachains come from the
+    /// stack's descriptor and `[relaychain]` / `[[parachains]]` only carry
+    /// overrides, see [`crate::stack`].
+    pub stack: Option<StackConfig>,
+}
+
+/// `[stack]` table of the config file.
+#[derive(Debug, Deserialize, Serialize, Clone, PartialEq, Default)]
+pub struct StackConfig {
+    /// Descriptor URL, local file or `polkadotapp://stack?url=...&key=...` link.
+    pub pointer: String,
+    /// Operator's Ed25519 public key (0x-prefixed hex). Checks the signature of
+    /// a pointer that does not carry one itself.
+    pub key: Option<String>,
+    /// Roles of the chains to bite (e.g. `["AssetHub", "People"]`). The relay
+    /// is always bitten. Defaults to every chain of the stack.
+    pub chains: Option<Vec<String>>,
 }
 
 /// `[doppelganger]` table of the config file, see [`DoppelgangerSetup`].
@@ -980,9 +1017,14 @@ pub struct DoppelgangerConfig {
 
 #[derive(Debug, Deserialize, Serialize, Clone, PartialEq)]
 pub struct RelaychainConfig {
-    pub network: String, // polkadot, kusama, paseo
+    /// polkadot, kusama, paseo, westend, or the name of a custom relay (which
+    /// then needs `chain_spec` and `sync_url`). Ignored when biting a stack.
+    #[serde(default)]
+    pub network: String,
     pub runtime_override: Option<String>,
     pub sync_url: Option<String>,
+    /// Chain-spec of a custom relay.
+    pub chain_spec: Option<String>,
     pub bite_at: Option<u32>,
     pub upgrade: Option<String>,
     /// Binary to run the nodes of the spawned network with.
@@ -1008,6 +1050,9 @@ pub struct ParachainConfig {
     pub chain_spec: Option<String>,
     /// Number of cores to assign, NOTE: only used in `custom` paras
     pub cores: Option<u32>,
+    /// Role of the chain in a Trinity stack (e.g. `AssetHub`). In a stack
+    /// bite it selects the stack chain this entry overrides.
+    pub role: Option<String>,
     /// Binary to run the collator of the spawned network with.
     /// Defaults to `polkadot-parachain`.
     pub command: Option<String>,
@@ -1066,6 +1111,7 @@ impl ParachainConfig {
                     chain_spec,
                     id,
                     cores: self.cores.unwrap_or(1),
+                    role: self.role.clone(),
                 })
             }
             _ => None,
@@ -1082,12 +1128,22 @@ impl ZombieBiteConfig {
     }
 
     pub fn get_relaychain(&self) -> Relaychain {
-        Relaychain::new_with_values(
-            &self.relaychain.network,
-            self.relaychain.runtime_override.clone(),
-            self.relaychain.sync_url.clone(),
-            self.relaychain.bite_at,
-        )
+        let relay = &self.relaychain;
+        match (&relay.chain_spec, &relay.sync_url) {
+            (Some(chain_spec), Some(sync_url)) => Relaychain::new_custom(
+                &relay.network,
+                chain_spec,
+                sync_url,
+                relay.runtime_override.clone(),
+                relay.bite_at,
+            ),
+            _ => Relaychain::new_with_values(
+                &relay.network,
+                relay.runtime_override.clone(),
+                relay.sync_url.clone(),
+                relay.bite_at,
+            ),
+        }
     }
 
     pub fn get_parachains(&self) -> Result<Vec<Parachain>, anyhow::Error> {
@@ -1194,6 +1250,7 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1217,6 +1274,7 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1240,6 +1298,7 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1260,6 +1319,7 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1286,6 +1346,7 @@ mod test {
             id: None,
             chain_spec: None,
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1308,6 +1369,7 @@ mod test {
                 id: None,
                 chain_spec: None,
                 cores: None,
+                role: None,
                 command: None,
                 image: None,
             };
@@ -1543,6 +1605,7 @@ mod test {
                 runtime_override: None,
                 upgrade: None,
                 sync_url: None,
+                chain_spec: None,
                 bite_at: None,
                 command: None,
                 image: None,
@@ -1555,6 +1618,7 @@ mod test {
             keep_messaging_state: None,
             publish_bootnodes: None,
             doppelganger: None,
+            stack: None,
         };
 
         assert_eq!(config.get_parachains().unwrap().len(), 0);
@@ -1568,6 +1632,7 @@ mod test {
                 runtime_override: None,
                 upgrade: None,
                 sync_url: None,
+                chain_spec: None,
                 bite_at: None,
                 command: None,
                 image: None,
@@ -1583,6 +1648,7 @@ mod test {
                     id: None,
                     chain_spec: None,
                     cores: None,
+                    role: None,
                     command: None,
                     image: None,
                 },
@@ -1596,6 +1662,7 @@ mod test {
                     id: None,
                     chain_spec: None,
                     cores: None,
+                    role: None,
                     command: None,
                     image: None,
                 },
@@ -1609,6 +1676,7 @@ mod test {
                     id: None,
                     chain_spec: None,
                     cores: None,
+                    role: None,
                     command: None,
                     image: None,
                 },
@@ -1620,6 +1688,7 @@ mod test {
             keep_messaging_state: None,
             publish_bootnodes: None,
             doppelganger: None,
+            stack: None,
         };
 
         let parachains = config.get_parachains().unwrap();
@@ -1733,6 +1802,7 @@ network = "polkadot"
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
             cores: 0,
+            role: None,
         };
         assert_eq!(para.id(), 3392);
     }
@@ -1747,6 +1817,7 @@ network = "polkadot"
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
             cores: 1,
+            role: None,
         };
         assert_eq!(para.as_chain_string("kusama"), "3392-kusama");
         assert_eq!(para.as_local_chain_string("kusama"), "3392-kusama-local");
@@ -1762,6 +1833,7 @@ network = "polkadot"
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
             cores: 1,
+            role: None,
         };
         assert_eq!(para.chain_spec_path(), Some("/path/to/spec.json"));
         assert!(para.is_custom());
@@ -1816,6 +1888,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: Some(3392),
             chain_spec: Some("/path/to/spec.json".to_string()),
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1836,6 +1909,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: None,
             chain_spec: Some("/path/to/spec.json".to_string()),
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1857,6 +1931,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: Some(3392),
             chain_spec: None,
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1878,6 +1953,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id: Some(3392),
             chain_spec: Some("/path/to/spec.json".to_string()),
             cores: None,
+            role: None,
             command: None,
             image: None,
         };
@@ -1902,6 +1978,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
             cores: 1,
+            role: None,
         }];
 
         let config =
@@ -1929,6 +2006,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             id,
             chain_spec: Some("/tmp/spec.json".to_string()),
             cores: None,
+            role: None,
             command: command.map(str::to_string),
             image: image.map(str::to_string),
         }
@@ -1941,6 +2019,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
                 runtime_override: None,
                 upgrade: None,
                 sync_url: None,
+                chain_spec: None,
                 bite_at: None,
                 command: Some("./bins/polkadot".to_string()),
                 image: Some("docker.io/parity/polkadot:v1.19.0".to_string()),
@@ -1953,6 +2032,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             keep_messaging_state: None,
             publish_bootnodes: None,
             doppelganger: None,
+            stack: None,
         }
     }
 

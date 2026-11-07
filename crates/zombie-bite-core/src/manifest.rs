@@ -45,6 +45,9 @@ pub struct Manifest {
     pub created_at: u64,
     pub relay: ChainEntry,
     pub parachains: Vec<ChainEntry>,
+    /// The Trinity stack the chains were read from, when bitten from one.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub stack: Option<crate::stack::StackSource>,
 }
 
 pub fn now_unix() -> u64 {
@@ -89,6 +92,7 @@ mod test {
                 bite_block: Some(7),
                 ..Default::default()
             }],
+            stack: None,
         };
         manifest.write(&dir).await.unwrap();
 

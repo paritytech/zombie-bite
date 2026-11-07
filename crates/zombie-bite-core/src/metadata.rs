@@ -15,6 +15,46 @@ use zombienet_sdk::subxt::{
     Metadata,
 };
 
+/// Cores per para id from the relay's `ParachainHost_claim_queue` (a SCALE
+/// `BTreeMap<CoreIndex, VecDeque<ParaId>>`). Each core goes to the para that
+/// holds most of its queue (the first one to appear on a tie), so a core shared
+/// through interlaced or on-demand assignments is counted once.
+pub(crate) fn claim_queue_cores(
+    bytes: &[u8],
+) -> Result<std::collections::BTreeMap<u32, u32>, anyhow::Error> {
+    use std::collections::{BTreeMap, VecDeque};
+    use zombienet_sdk::subxt::ext::codec::Decode;
+
+    let mut input = bytes;
+    let queue = BTreeMap::<u32, VecDeque<u32>>::decode(&mut input)
+        .map_err(|e| anyhow!("can't decode the claim queue: {e}"))?;
+    if !input.is_empty() {
+        bail!("{} trailing byte(s) after the claim queue", input.len());
+    }
+
+    let mut cores = BTreeMap::new();
+    for paras in queue.values() {
+        // (para, entries), in order of first appearance
+        let mut counts: Vec<(u32, usize)> = vec![];
+        for para in paras {
+            match counts.iter_mut().find(|(p, _)| p == para) {
+                Some((_, n)) => *n += 1,
+                None => counts.push((*para, 1)),
+            }
+        }
+        let mut owner: Option<(u32, usize)> = None;
+        for (para, n) in counts {
+            if owner.is_none_or(|(_, best)| n > best) {
+                owner = Some((para, n));
+            }
+        }
+        if let Some((para, _)) = owner {
+            *cores.entry(para).or_insert(0) += 1;
+        }
+    }
+    Ok(cores)
+}
+
 pub fn storage_key(pallet: &str, item: &str) -> String {
     array_bytes::bytes2hex(
         "",
@@ -171,6 +211,21 @@ impl ChainMetadata {
         let bytes = hex::decode(raw.trim_start_matches("0x"))?;
         Option::<Vec<(Vec<u8>, [u8; 4])>>::decode(&mut &bytes[..])
             .map_err(|e| anyhow!("SessionKeys_decode_session_keys: can't decode the result: {e}"))
+    }
+
+    /// A `u64` (or narrower unsigned) pallet constant, e.g.
+    /// `Babe::EpochDuration`; `None` when the runtime has no such constant.
+    pub fn constant_u64(&self, pallet: &str, name: &str) -> Option<u64> {
+        let bytes = self
+            .metadata
+            .pallet_by_name(pallet)?
+            .constant_by_name(name)?
+            .value();
+        match bytes.len() {
+            8 => Some(u64::from_le_bytes(bytes.try_into().ok()?)),
+            4 => Some(u32::from_le_bytes(bytes.try_into().ok()?).into()),
+            _ => None,
+        }
     }
 
     /// Read a live storage value as hex (no `0x` prefix), at the same block the
@@ -351,5 +406,33 @@ mod test {
         let expected = value!({ scheduler_params: { num_cores: 5u32 } }).map_context(|_| 0_u32);
         assert_eq!(v, expected);
         assert!(nested_mut(&mut v, "missing").is_none());
+    }
+
+    #[test]
+    fn claim_queue_cores_from_previewnet() {
+        // live `ParachainHost_claim_queue` of previewnet's relay: cores 0-2 to
+        // 1500, 3 to 1502, 4 to 1501, 5 to 1600
+        let raw = "18000000000cdc050000dc050000dc050000010000000cdc050000dc050000dc050000020000000cdc050000dc050000dc050000030000000cde050000de050000de050000040000000cdd050000dd050000dd050000050000000c400600004006000040060000";
+        let cores = claim_queue_cores(&hex::decode(raw).unwrap()).unwrap();
+        assert_eq!(
+            cores.into_iter().collect::<Vec<_>>(),
+            vec![(1500, 3), (1501, 1), (1502, 1), (1600, 1)]
+        );
+    }
+
+    #[test]
+    fn claim_queue_shared_core_goes_to_the_majority() {
+        use std::collections::{BTreeMap, VecDeque};
+        use zombienet_sdk::subxt::ext::codec::Encode;
+        let mut queue: BTreeMap<u32, VecDeque<u32>> = BTreeMap::new();
+        queue.insert(0, VecDeque::from([2000, 2001, 2001]));
+        queue.insert(1, VecDeque::from([2002, 2003])); // tie: first wins
+        queue.insert(2, VecDeque::new()); // idle core
+        let cores = claim_queue_cores(&queue.encode()).unwrap();
+        assert_eq!(
+            cores.into_iter().collect::<Vec<_>>(),
+            vec![(2001, 1), (2002, 1)]
+        );
+        assert!(claim_queue_cores(&[0x04]).is_err());
     }
 }
