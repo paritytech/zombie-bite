@@ -36,9 +36,7 @@ tar = "0.4"
 flate2 = "1.0"
 sp-core = "34.0.0"
 toml = "0.9"
-ed25519-dalek = "2.1"
-sha2 = "0.10"
-base64 = "0.22"
+trinity-stack = "0.2"
 url = "2.5"
 
 [dev-dependencies]

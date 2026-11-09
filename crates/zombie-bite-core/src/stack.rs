@@ -5,28 +5,27 @@
 //! role, para id, genesis hash, RPC endpoints and full chain-spec, optionally
 //! signed by the stack's operator. This module reads one from a pointer (a
 //! descriptor URL, a local file or a `polkadotapp://stack?url=...&key=...`
-//! link), checks it, and turns it into the [`ZombieBiteConfig`] a user would
-//! otherwise write by hand: a custom relay plus custom parachains, with the
-//! chain-specs downloaded and the core count of each para read from the relay.
-//! From there the bite is resolved and run as any other.
+//! link) and turns it into the [`ZombieBiteConfig`] a user would otherwise
+//! write by hand: a custom relay plus custom parachains, with the chain-specs
+//! downloaded and the core count of each para read from the relay. From there
+//! the bite is resolved and run as any other.
+//!
+//! Every rule of the RFC (pointers, envelopes and their signatures, I-JSON,
+//! the descriptor's format and the spec digests) is applied by the
+//! [`trinity_stack`] crate, so zombie-bite accepts and refuses the same
+//! descriptors as every other reader.
 
 use std::{
-    collections::{BTreeMap, HashSet},
-    net::IpAddr,
+    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Duration,
 };
 
 use anyhow::{anyhow, bail, Context as _};
-use base64::Engine as _;
-use ed25519_dalek::{Signature, VerifyingKey};
-use serde::{
-    de::{self, Visitor},
-    Deserialize, Deserializer, Serialize,
-};
-use sha2::{Digest, Sha256};
+use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::{info, warn};
+use trinity_stack::{accept, Chain, Descriptor, Document, Fetched, Pointer};
 use zombienet_sdk::subxt::ext::subxt_rpcs::{client::RpcParams, RpcClient};
 
 use crate::{
@@ -34,8 +33,6 @@ use crate::{
     metadata::claim_queue_cores,
 };
 
-/// Descriptor format version this reader understands.
-pub const DESCRIPTOR_VERSION: u32 = 1;
 /// Role of the relay chain in a descriptor.
 pub const ROLE_RELAY: &str = "Relay";
 /// Where, under the base path, the stack's chain-specs are downloaded.
@@ -45,6 +42,11 @@ pub const STACK_DIR: &str = "stack";
 pub const STACK_CONFIG_FILE: &str = "stack-config.toml";
 
 const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];
+
+/// Stand-in URL for the pointer of a descriptor read from a local file. A
+/// [`Pointer`] only takes web URLs, and reading a document applies only its
+/// key, so the URL is never used.
+const LOCAL_FILE_URL: &str = "https://localhost/trinity-stack.json";
 
 // ---------------------------------------------------------------------------
 // Pointer
@@ -67,187 +69,79 @@ impl std::fmt::Display for Source {
 }
 
 /// A stack pointer: where its descriptor lives and, for a signed stack, the
-/// operator's key.
+/// operator's key. A descriptor URL or link is read with the crate's
+/// [`Pointer`]; a local file has no pointer of its own, only a key.
 #[derive(Debug, Clone, PartialEq)]
-pub struct Pointer {
+pub struct StackPointer {
     pub source: Source,
-    pub key: Option<[u8; 32]>,
+    /// The pointer whose rules a fetched document is read with.
+    rules: Pointer,
 }
 
-impl Pointer {
+impl StackPointer {
     /// Parse a pointer from a link (`<any scheme or domain>?url=...&key=...`),
     /// a descriptor URL, a `file://` URL or a local path. `extra_key` is a key
     /// given apart from the link (`--stack-key`); it has to agree with the
     /// link's own key when both are present.
     pub fn parse(s: &str, extra_key: Option<&str>) -> Result<Self, anyhow::Error> {
         let s = s.trim();
-        let (source, link_key) = match url::Url::parse(s) {
+        let refused = |e: trinity_stack::Error| anyhow!("invalid stack pointer '{s}': {e}");
+        let (source, rules) = match url::Url::parse(s) {
             Ok(link) if link.query_pairs().any(|(k, _)| k == "url") => {
-                // Readers take the pointer from the query, whatever the scheme
-                // or domain the link arrives on, and ignore other parameters.
-                let mut url = None;
-                let mut key = None;
-                for (k, v) in link.query_pairs() {
-                    match k.as_ref() {
-                        "url" => url = Some(v.into_owned()),
-                        "key" => key = Some(v.into_owned()),
-                        _ => {}
+                let link = Pointer::from_link(s).map_err(refused)?;
+                let rules = match extra_key {
+                    None => link,
+                    Some(extra) => {
+                        let with_extra =
+                            Pointer::new(link.url().as_str(), Some(extra)).map_err(refused)?;
+                        if let Some(key) = link.key() {
+                            if Some(key) != with_extra.key() {
+                                bail!(
+                                    "the stack link carries key 0x{}, which differs from the given key {extra}",
+                                    hex::encode(key)
+                                );
+                            }
+                        }
+                        with_extra
                     }
-                }
-                let url = url.expect("checked above");
-                check_url(&url, &["https"])
-                    .with_context(|| format!("stack link '{s}' has an invalid url"))?;
-                (Source::Url(url), key)
+                };
+                (Source::Url(rules.url().to_string()), rules)
             }
             Ok(url) if url.scheme() == "file" => {
                 let path = url
                     .to_file_path()
                     .map_err(|_| anyhow!("invalid file url '{s}'"))?;
-                (Source::File(path), None)
+                (Source::File(path), local_rules(extra_key).map_err(refused)?)
             }
             Ok(url) if matches!(url.scheme(), "http" | "https") => {
-                check_url(s, &["https"])?;
-                (Source::Url(s.to_string()), None)
+                let rules = Pointer::new(s, extra_key).map_err(refused)?;
+                (Source::Url(s.to_string()), rules)
             }
             Ok(url) if url.scheme().len() > 1 => {
                 bail!("'{s}' is neither a stack link (no 'url' parameter), a descriptor url nor a file")
             }
             // No scheme, or a Windows drive letter: a local path.
-            _ => (Source::File(PathBuf::from(s)), None),
+            _ => (
+                Source::File(PathBuf::from(s)),
+                local_rules(extra_key).map_err(refused)?,
+            ),
         };
-
-        let key = match (link_key.as_deref(), extra_key) {
-            (Some(a), Some(b)) if a != b => {
-                bail!("the stack link carries key {a}, which differs from the given key {b}")
-            }
-            (Some(k), _) | (None, Some(k)) => Some(parse_hex::<32>(k, "key")?),
-            (None, None) => None,
-        };
-
-        Ok(Self { source, key })
+        Ok(Self { source, rules })
     }
+
+    /// The operator's key, when the stack is signed.
+    pub fn key(&self) -> Option<&[u8; 32]> {
+        self.rules.key()
+    }
+}
+
+fn local_rules(key: Option<&str>) -> Result<Pointer, trinity_stack::Error> {
+    Pointer::new(LOCAL_FILE_URL, key)
 }
 
 // ---------------------------------------------------------------------------
 // Descriptor
 // ---------------------------------------------------------------------------
-
-/// The parts of a descriptor zombie-bite reads; unknown fields are ignored, as
-/// the RFC requires.
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Descriptor {
-    #[serde(rename = "$v")]
-    pub v: u32,
-    #[serde(default)]
-    pub sequence: u64,
-    #[serde(default)]
-    pub generation: String,
-    pub id: String,
-    #[serde(default)]
-    pub name: String,
-    #[serde(default)]
-    pub network: String,
-    /// Unix seconds at which the stack is shut down.
-    pub expires_at: Option<u64>,
-    pub chains: Vec<Chain>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-#[serde(rename_all = "camelCase")]
-pub struct Chain {
-    pub role: String,
-    pub genesis_hash: String,
-    pub para_id: Option<u32>,
-    pub rpc: Vec<String>,
-    pub full_spec: Option<SpecFile>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct SpecFile {
-    pub url: String,
-    pub sha256: String,
-}
-
-#[derive(Debug, Deserialize)]
-struct Envelope {
-    #[serde(rename = "$v")]
-    v: u32,
-    payload: String,
-    signature: String,
-}
-
-impl Descriptor {
-    pub fn relay(&self) -> &Chain {
-        self.chains
-            .iter()
-            .find(|c| c.role == ROLE_RELAY)
-            .expect("validated: exactly one relay")
-    }
-
-    pub fn parachains(&self) -> impl Iterator<Item = &Chain> {
-        self.chains.iter().filter(|c| c.role != ROLE_RELAY)
-    }
-
-    /// Check the format rules zombie-bite depends on.
-    pub fn validate(&self, now_unix: u64) -> Result<(), anyhow::Error> {
-        if self.v != DESCRIPTOR_VERSION {
-            bail!(
-                "descriptor version {} is not supported (expected {DESCRIPTOR_VERSION})",
-                self.v
-            );
-        }
-        if self.id.trim().is_empty() {
-            bail!("descriptor has an empty 'id'");
-        }
-        if let Some(expires_at) = self.expires_at {
-            if expires_at <= now_unix {
-                bail!(
-                    "stack '{}' expired at {expires_at} (now {now_unix}), there is nothing left to bite",
-                    self.id
-                );
-            }
-        }
-
-        let relays = self.chains.iter().filter(|c| c.role == ROLE_RELAY).count();
-        if relays != 1 {
-            bail!("a descriptor must have exactly one '{ROLE_RELAY}' chain, found {relays}");
-        }
-
-        let mut roles = HashSet::new();
-        let mut para_ids = HashSet::new();
-        for chain in &self.chains {
-            if !roles.insert(chain.role.as_str()) {
-                bail!("chain role '{}' appears more than once", chain.role);
-            }
-            match (chain.role == ROLE_RELAY, chain.para_id) {
-                (true, Some(_)) => bail!("the relay chain must not have a 'paraId'"),
-                (false, None) => bail!("chain '{}' has no 'paraId'", chain.role),
-                (false, Some(id)) if !para_ids.insert(id) => {
-                    bail!("paraId {id} appears more than once")
-                }
-                _ => {}
-            }
-            if chain.rpc.is_empty() {
-                bail!("chain '{}' has no rpc endpoint", chain.role);
-            }
-            for rpc in &chain.rpc {
-                check_url(rpc, &["wss"])
-                    .with_context(|| format!("chain '{}' has an invalid rpc", chain.role))?;
-            }
-            parse_hex::<32>(&chain.genesis_hash, "genesisHash")
-                .with_context(|| format!("chain '{}'", chain.role))?;
-            if let Some(spec) = &chain.full_spec {
-                check_url(&spec.url, &["https"]).with_context(|| {
-                    format!("chain '{}' has an invalid fullSpec url", chain.role)
-                })?;
-                parse_hex::<32>(&spec.sha256, "fullSpec.sha256")
-                    .with_context(|| format!("chain '{}'", chain.role))?;
-            }
-        }
-        Ok(())
-    }
-}
 
 /// How a descriptor was read, recorded in the bite's manifest.
 #[derive(Debug, Clone, Default, PartialEq, Serialize, Deserialize)]
@@ -264,68 +158,47 @@ pub struct StackSource {
     pub signature_verified: bool,
 }
 
-/// Decode a fetched document: an envelope (signed) or a plain descriptor.
-/// With a key only an envelope verifying against it is accepted.
+/// Read a fetched document with the pointer's rules: with a key only an
+/// envelope verifying against it is accepted, without one an envelope is read
+/// as unsigned. A stack past its `expiresAt` is refused, as there is nothing
+/// left to bite. Returns the descriptor and whether its signature was checked.
 pub fn decode_document(
     bytes: &[u8],
-    key: Option<&[u8; 32]>,
+    pointer: &StackPointer,
+    now_unix: i64,
 ) -> Result<(Descriptor, bool), anyhow::Error> {
-    reject_duplicate_members(bytes).context("the descriptor is not valid I-JSON")?;
-    let doc: serde_json::Value =
-        serde_json::from_slice(bytes).context("the descriptor is not valid json")?;
-
-    let is_envelope = doc.get("payload").is_some();
-    let (descriptor, verified) = if is_envelope {
-        let envelope: Envelope =
-            serde_json::from_value(doc).context("invalid descriptor envelope")?;
-        let payload = base64::engine::general_purpose::STANDARD
-            .decode(envelope.payload.as_bytes())
-            .context("the envelope payload is not standard base64")?;
-        let verified = match key {
-            Some(key) => {
-                verify_signature(envelope.v, &payload, &envelope.signature, key)?;
-                true
-            }
-            None => {
-                warn!("the stack descriptor is signed but no key was given, its signature is NOT checked (pass the stack link or --stack-key to check it)");
-                false
-            }
-        };
-        reject_duplicate_members(&payload).context("the descriptor payload is not valid I-JSON")?;
-        let descriptor: Descriptor =
-            serde_json::from_slice(&payload).context("invalid descriptor payload")?;
-        if descriptor.v != envelope.v {
-            bail!(
-                "the envelope is version {} but its payload is version {}",
-                envelope.v,
-                descriptor.v
-            );
-        }
-        (descriptor, verified)
-    } else {
-        if key.is_some() {
-            bail!("the pointer carries a key but the descriptor is not signed; refusing it");
-        }
-        (
-            serde_json::from_value(doc).context("invalid descriptor")?,
-            false,
-        )
-    };
-    Ok((descriptor, verified))
+    let accepted = accept(&pointer.rules, None, Fetched::Document(bytes), now_unix)
+        .map_err(|e| anyhow!("the stack descriptor is refused: {e} ({})", e.code()))?;
+    let descriptor = accepted.stack.descriptor;
+    if accepted.expired {
+        bail!(
+            "stack '{}' expired at {} (now {now_unix}), there is nothing left to bite",
+            descriptor.id,
+            descriptor.expires_at.unwrap_or_default()
+        );
+    }
+    if accepted.stale {
+        warn!(
+            "stack '{}' is past its validUntil ({}), the operator may have published a newer descriptor",
+            descriptor.id,
+            descriptor.valid_until.unwrap_or_default()
+        );
+    }
+    if !accepted.stack.signed && matches!(Document::parse(bytes), Ok(Document::Envelope { .. })) {
+        warn!("the stack descriptor is signed but no key was given, its signature is NOT checked (pass the stack link or --stack-key to check it)");
+    }
+    Ok((descriptor, accepted.stack.signed))
 }
 
-fn verify_signature(
-    version: u32,
-    payload: &[u8],
-    signature: &str,
-    key: &[u8; 32],
-) -> Result<(), anyhow::Error> {
-    let key = VerifyingKey::from_bytes(key).map_err(|e| anyhow!("invalid operator key: {e}"))?;
-    let signature = Signature::from_bytes(&parse_hex::<64>(signature, "signature")?);
-    let mut message = format!("trinity-stack/descriptor/v{version}").into_bytes();
-    message.extend_from_slice(payload);
-    key.verify_strict(&message, &signature)
-        .map_err(|_| anyhow!("the descriptor signature does not verify against the stack key"))
+/// The descriptor's relay; validation guarantees exactly one.
+fn relay_chain(descriptor: &Descriptor) -> &Chain {
+    descriptor
+        .chain(ROLE_RELAY)
+        .expect("validated: exactly one relay")
+}
+
+fn parachains(descriptor: &Descriptor) -> impl Iterator<Item = &Chain> {
+    descriptor.chains.iter().filter(|c| c.role != ROLE_RELAY)
 }
 
 // ---------------------------------------------------------------------------
@@ -349,11 +222,11 @@ pub async fn materialize(
     base_path: &Path,
     relay_bite_at: Option<u32>,
 ) -> Result<StackBite, anyhow::Error> {
-    let pointer = Pointer::parse(&stack.pointer, stack.key.as_deref())?;
+    let pointer = StackPointer::parse(&stack.pointer, stack.key.as_deref())?;
     info!("📚 reading stack descriptor from {}", pointer.source);
     let bytes = fetch(&pointer.source).await?;
-    let (descriptor, verified) = decode_document(&bytes, pointer.key.as_ref())?;
-    descriptor.validate(crate::manifest::now_unix())?;
+    let (descriptor, verified) =
+        decode_document(&bytes, &pointer, crate::manifest::now_unix() as i64)?;
     info!(
         "📚 stack '{}' ({}), sequence {}, {} chain(s){}",
         descriptor.id,
@@ -372,7 +245,7 @@ pub async fn materialize(
     fs::create_dir_all(&spec_dir).await?;
 
     let relay_name = relay_name(&descriptor.id);
-    let relay = descriptor.relay();
+    let relay = relay_chain(&descriptor);
     let relay_rpc = pick_endpoint(relay).await?;
     let relay_spec = download_spec(&http, relay, &spec_dir, &relay_name).await?;
     let relay_spec_id = spec_id(&relay_spec).await?;
@@ -453,8 +326,8 @@ pub async fn materialize(
     let source = StackSource {
         id: descriptor.id.clone(),
         source: pointer.source.to_string(),
-        key: pointer.key.map(|k| format!("0x{}", hex::encode(k))),
-        sequence: descriptor.sequence,
+        key: pointer.key().map(|k| format!("0x{}", hex::encode(k))),
+        sequence: descriptor.sequence.into(),
         generation: descriptor.generation.clone(),
         signature_verified: verified,
     };
@@ -554,7 +427,7 @@ fn select_chains<'d>(
     descriptor: &'d Descriptor,
     wanted: Option<&[String]>,
 ) -> Result<Vec<&'d Chain>, anyhow::Error> {
-    let relay = descriptor.relay();
+    let relay = relay_chain(descriptor);
     if relay.full_spec.is_none() {
         bail!("the stack's relay has no 'fullSpec', it can't be bitten");
     }
@@ -566,15 +439,13 @@ fn select_chains<'d>(
                 if role.eq_ignore_ascii_case(ROLE_RELAY) {
                     continue; // always bitten
                 }
-                let chain = descriptor
-                    .parachains()
+                let chain = parachains(descriptor)
                     .find(|c| c.role.eq_ignore_ascii_case(role))
                     .ok_or_else(|| {
                         anyhow!(
                             "stack '{}' has no '{role}' chain (it has: {})",
                             descriptor.id,
-                            descriptor
-                                .parachains()
+                            parachains(descriptor)
                                 .map(|c| c.role.as_str())
                                 .collect::<Vec<_>>()
                                 .join(", ")
@@ -592,8 +463,7 @@ fn select_chains<'d>(
             }
             Ok(chains)
         }
-        None => Ok(descriptor
-            .parachains()
+        None => Ok(parachains(descriptor)
             .filter(|c| {
                 if c.full_spec.is_none() {
                     warn!(
@@ -713,10 +583,8 @@ async fn download_spec(
         "{relay_name}-{}.json",
         chain.role.to_ascii_lowercase()
     ));
-    let expected = spec.sha256.trim_start_matches("0x").to_ascii_lowercase();
-
     if let Ok(bytes) = fs::read(&path).await {
-        if hex::encode(Sha256::digest(&bytes)) == expected {
+        if spec.check(&bytes).is_ok() {
             info!("📄 {} chain-spec already at {}", chain.role, path.display());
             return Ok(path);
         }
@@ -734,14 +602,14 @@ async fn download_spec(
         .error_for_status()?
         .bytes()
         .await?;
-    let got = hex::encode(Sha256::digest(&bytes));
-    if got != expected {
-        bail!(
-            "the {} chain-spec at {} has sha256 0x{got}, the descriptor says 0x{expected}",
+    spec.check(&bytes).map_err(|e| {
+        anyhow!(
+            "the {} chain-spec at {} doesn't match the descriptor: {e} (expected sha256 {})",
             chain.role,
-            spec.url
-        );
-    }
+            spec.url,
+            spec.sha256
+        )
+    })?;
     fs::write(&path, &bytes).await?;
     Ok(path)
 }
@@ -794,128 +662,9 @@ async fn check_para_spec(
     Ok(())
 }
 
-// ---------------------------------------------------------------------------
-// Format helpers
-// ---------------------------------------------------------------------------
-
-/// 0x-prefixed lowercase hex of exactly `N` bytes.
-fn parse_hex<const N: usize>(s: &str, what: &str) -> Result<[u8; N], anyhow::Error> {
-    let hex_part = s
-        .strip_prefix("0x")
-        .ok_or_else(|| anyhow!("{what} '{s}' is not 0x-prefixed"))?;
-    if hex_part.chars().any(|c| c.is_ascii_uppercase()) {
-        bail!("{what} '{s}' must be lowercase hex");
-    }
-    let bytes = hex::decode(hex_part).map_err(|e| anyhow!("{what} '{s}' is not hex: {e}"))?;
-    bytes
-        .try_into()
-        .map_err(|b: Vec<u8>| anyhow!("{what} must be {N} bytes, got {}", b.len()))
-}
-
-/// The RFC's URL rules: one of the `secure` schemes, or its insecure
-/// counterpart for a literal private address; never credentials.
-fn check_url(s: &str, secure: &[&str]) -> Result<(), anyhow::Error> {
-    if s.contains('\\') {
-        bail!("url '{s}' contains '\\'");
-    }
-    let url = url::Url::parse(s).map_err(|e| anyhow!("invalid url '{s}': {e}"))?;
-    if !url.username().is_empty() || url.password().is_some() {
-        bail!("url '{s}' must not carry credentials");
-    }
-    let scheme = url.scheme();
-    if secure.contains(&scheme) {
-        return Ok(());
-    }
-    let insecure_ok = matches!(scheme, "http" | "ws")
-        && secure
-            .iter()
-            .any(|s| (*s == "https" && scheme == "http") || (*s == "wss" && scheme == "ws"))
-        && match url.host() {
-            Some(url::Host::Ipv4(ip)) => is_private(IpAddr::V4(ip)),
-            Some(url::Host::Ipv6(ip)) => is_private(IpAddr::V6(ip)),
-            _ => false,
-        };
-    if insecure_ok {
-        Ok(())
-    } else {
-        bail!(
-            "url '{s}' must use {} ({scheme} is only allowed for a literal private address)",
-            secure.join("/")
-        )
-    }
-}
-
-fn is_private(ip: IpAddr) -> bool {
-    match ip {
-        IpAddr::V4(ip) => ip.is_loopback() || ip.is_private(),
-        IpAddr::V6(ip) => {
-            let first = ip.segments()[0];
-            ip.is_loopback() || (first & 0xfe00) == 0xfc00 || (first & 0xffc0) == 0xfe80
-        }
-    }
-}
-
-/// Refuse duplicate member names anywhere in the document: two parsers that
-/// resolve them differently would read one signed descriptor two ways.
-fn reject_duplicate_members(bytes: &[u8]) -> Result<(), anyhow::Error> {
-    serde_json::from_slice::<NoDuplicates>(bytes)?;
-    Ok(())
-}
-
-struct NoDuplicates;
-
-impl<'de> Deserialize<'de> for NoDuplicates {
-    fn deserialize<D: Deserializer<'de>>(d: D) -> Result<Self, D::Error> {
-        d.deserialize_any(NoDuplicatesVisitor)
-    }
-}
-
-struct NoDuplicatesVisitor;
-
-impl<'de> Visitor<'de> for NoDuplicatesVisitor {
-    type Value = NoDuplicates;
-
-    fn expecting(&self, f: &mut std::fmt::Formatter) -> std::fmt::Result {
-        f.write_str("any json value")
-    }
-    fn visit_bool<E>(self, _: bool) -> Result<NoDuplicates, E> {
-        Ok(NoDuplicates)
-    }
-    fn visit_i64<E>(self, _: i64) -> Result<NoDuplicates, E> {
-        Ok(NoDuplicates)
-    }
-    fn visit_u64<E>(self, _: u64) -> Result<NoDuplicates, E> {
-        Ok(NoDuplicates)
-    }
-    fn visit_f64<E>(self, _: f64) -> Result<NoDuplicates, E> {
-        Ok(NoDuplicates)
-    }
-    fn visit_str<E>(self, _: &str) -> Result<NoDuplicates, E> {
-        Ok(NoDuplicates)
-    }
-    fn visit_unit<E>(self) -> Result<NoDuplicates, E> {
-        Ok(NoDuplicates)
-    }
-    fn visit_seq<A: de::SeqAccess<'de>>(self, mut seq: A) -> Result<NoDuplicates, A::Error> {
-        while seq.next_element::<NoDuplicates>()?.is_some() {}
-        Ok(NoDuplicates)
-    }
-    fn visit_map<A: de::MapAccess<'de>>(self, mut map: A) -> Result<NoDuplicates, A::Error> {
-        let mut seen = HashSet::new();
-        while let Some(key) = map.next_key::<String>()? {
-            if !seen.insert(key.clone()) {
-                return Err(de::Error::custom(format!("duplicate member '{key}'")));
-            }
-            map.next_value::<NoDuplicates>()?;
-        }
-        Ok(NoDuplicates)
-    }
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use ed25519_dalek::{Signer, SigningKey};
 
     const KEY_SEED: [u8; 32] = [7; 32];
 
@@ -955,61 +704,58 @@ mod tests {
         .to_string()
     }
 
-    fn envelope(payload: &[u8], signing: &SigningKey, version: u32) -> Vec<u8> {
-        let mut msg = format!("trinity-stack/descriptor/v{version}").into_bytes();
-        msg.extend_from_slice(payload);
-        let sig = signing.sign(&msg);
-        serde_json::json!({
-            "$v": version,
-            "payload": base64::engine::general_purpose::STANDARD.encode(payload),
-            "signature": format!("0x{}", hex::encode(sig.to_bytes())),
-        })
-        .to_string()
-        .into_bytes()
+    fn public_key() -> String {
+        format!("0x{}", hex::encode(trinity_stack::public_key(&KEY_SEED)))
     }
 
-    fn key() -> (SigningKey, [u8; 32]) {
-        let signing = SigningKey::from_bytes(&KEY_SEED);
-        let public = signing.verifying_key().to_bytes();
-        (signing, public)
+    fn signed() -> Vec<u8> {
+        trinity_stack::sign(descriptor_json().as_bytes(), &KEY_SEED).unwrap()
+    }
+
+    fn pointer(key: Option<&str>) -> StackPointer {
+        StackPointer::parse("./stack.json", key).unwrap()
+    }
+
+    fn decode(bytes: &[u8], key: Option<&str>) -> Result<(Descriptor, bool), anyhow::Error> {
+        decode_document(bytes, &pointer(key), 0)
     }
 
     #[test]
     fn parses_links_urls_and_files() {
-        let k = format!("0x{}", "ab".repeat(32));
+        let k = public_key();
         let link = format!(
             "polkadotapp://stack?key={k}&url=https%3A%2F%2Fpreviewnet.substrate.dev%2F.well-known%2Ftrinity-stack.json&foo=bar"
         );
-        let p = Pointer::parse(&link, None).unwrap();
+        let p = StackPointer::parse(&link, None).unwrap();
         assert_eq!(
             p.source,
             Source::Url("https://previewnet.substrate.dev/.well-known/trinity-stack.json".into())
         );
-        assert_eq!(p.key, Some([0xab; 32]));
+        assert_eq!(p.key(), Some(&trinity_stack::public_key(&KEY_SEED)));
 
         // any scheme/domain carries the same pointer
-        let p = Pointer::parse(
+        let p = StackPointer::parse(
             "https://app.example/open?url=https%3A%2F%2Fa.example%2Fs.json",
             None,
         )
         .unwrap();
         assert_eq!(p.source, Source::Url("https://a.example/s.json".into()));
-        assert_eq!(p.key, None);
+        assert_eq!(p.key(), None);
 
-        let p = Pointer::parse("https://a.example/s.json", Some(&k)).unwrap();
+        // the same key given apart from the link agrees with it
+        assert!(StackPointer::parse(&link, Some(&k)).is_ok());
+
+        let p = StackPointer::parse("https://a.example/s.json", Some(&k)).unwrap();
         assert_eq!(p.source, Source::Url("https://a.example/s.json".into()));
-        assert_eq!(p.key, Some([0xab; 32]));
+        assert!(p.key().is_some());
 
         assert_eq!(
-            Pointer::parse("./stack.json", None).unwrap().source,
+            StackPointer::parse("./stack.json", None).unwrap().source,
             Source::File("./stack.json".into())
         );
-        assert_eq!(
-            Pointer::parse("file:///tmp/stack.json", None)
-                .unwrap()
-                .source,
-            Source::File("/tmp/stack.json".into())
-        );
+        let p = StackPointer::parse("file:///tmp/stack.json", Some(&k)).unwrap();
+        assert_eq!(p.source, Source::File("/tmp/stack.json".into()));
+        assert!(p.key().is_some());
     }
 
     #[test]
@@ -1018,121 +764,140 @@ mod tests {
         let other = format!("0x{}", "cd".repeat(32));
         let link = format!("polkadotapp://stack?key={k}&url=https%3A%2F%2Fa.example%2Fs.json");
         assert!(
-            Pointer::parse(&link, Some(&other)).is_err(),
+            StackPointer::parse(&link, Some(&other)).is_err(),
             "conflicting keys"
         );
         assert!(
-            Pointer::parse("http://a.example/s.json", None).is_err(),
+            StackPointer::parse("http://a.example/s.json", None).is_err(),
             "plain http"
         );
         assert!(
-            Pointer::parse("http://127.0.0.1:8080/s.json", None).is_ok(),
+            StackPointer::parse("http://127.0.0.1:8080/s.json", None).is_ok(),
             "private literal"
         );
         assert!(
-            Pointer::parse("https://u:p@a.example/s.json", None).is_err(),
+            StackPointer::parse("https://u:p@a.example/s.json", None).is_err(),
             "credentials"
         );
         assert!(
-            Pointer::parse("https://a.example/s.json", Some("0xABCD")).is_err(),
+            StackPointer::parse("https://a.example/s.json", Some("0xABCD")).is_err(),
             "bad key"
+        );
+        assert!(
+            StackPointer::parse("ftp://a.example/s.json", None).is_err(),
+            "unknown scheme"
         );
     }
 
     #[test]
     fn decodes_a_plain_descriptor() {
-        let (d, verified) = decode_document(descriptor_json().as_bytes(), None).unwrap();
+        let (d, verified) = decode(descriptor_json().as_bytes(), None).unwrap();
         assert!(!verified);
         assert_eq!(d.id, "previewnet");
-        assert_eq!(d.relay().role, "Relay");
-        assert_eq!(d.parachains().count(), 2);
-        d.validate(0).unwrap();
+        assert_eq!(relay_chain(&d).role, "Relay");
+        assert_eq!(parachains(&d).count(), 2);
     }
 
     #[test]
     fn verifies_a_signed_descriptor() {
-        let (signing, public) = key();
-        let doc = envelope(descriptor_json().as_bytes(), &signing, 1);
-        let (d, verified) = decode_document(&doc, Some(&public)).unwrap();
+        let (d, verified) = decode(&signed(), Some(&public_key())).unwrap();
         assert!(verified);
         assert_eq!(d.sequence, 42);
 
         // without a key the envelope is read as unsigned
-        let (_, verified) = decode_document(&doc, None).unwrap();
+        let (_, verified) = decode(&signed(), None).unwrap();
         assert!(!verified);
     }
 
     #[test]
-    fn rejects_a_wrong_key_or_a_tampered_payload() {
-        let (signing, _) = key();
-        let doc = envelope(descriptor_json().as_bytes(), &signing, 1);
-        let other = SigningKey::from_bytes(&[9; 32]).verifying_key().to_bytes();
-        assert!(decode_document(&doc, Some(&other)).is_err());
+    fn rejects_a_wrong_key_or_a_tampered_signature() {
+        let other = format!("0x{}", hex::encode(trinity_stack::public_key(&[9; 32])));
+        assert!(decode(&signed(), Some(&other)).is_err());
 
-        let (_, public) = key();
-        let mut env: serde_json::Value = serde_json::from_slice(&doc).unwrap();
-        let tampered = descriptor_json().replace("previewnet", "evilnet");
-        env["payload"] = base64::engine::general_purpose::STANDARD
-            .encode(tampered.as_bytes())
-            .into();
+        let mut env: serde_json::Value = serde_json::from_slice(&signed()).unwrap();
+        let sig = env["signature"].as_str().unwrap().to_string();
+        let flipped = if sig.ends_with('0') { '1' } else { '0' };
+        env["signature"] = format!("{}{flipped}", &sig[..sig.len() - 1]).into();
         let doc = serde_json::to_vec(&env).unwrap();
-        assert!(decode_document(&doc, Some(&public)).is_err());
+        assert!(decode(&doc, Some(&public_key())).is_err());
     }
 
     #[test]
     fn a_keyed_pointer_refuses_a_plain_descriptor() {
-        let (_, public) = key();
-        let err = decode_document(descriptor_json().as_bytes(), Some(&public)).unwrap_err();
+        let err = decode(descriptor_json().as_bytes(), Some(&public_key())).unwrap_err();
         assert!(err.to_string().contains("not signed"), "{err}");
     }
 
     #[test]
-    fn rejects_an_envelope_version_mismatch() {
-        let (signing, public) = key();
-        let doc = envelope(descriptor_json().as_bytes(), &signing, 2);
-        // the signature is over the v2 prefix, so it verifies, but the payload is v1
-        let err = decode_document(&doc, Some(&public)).unwrap_err();
+    fn rejects_an_unsupported_envelope_version() {
+        let mut env: serde_json::Value = serde_json::from_slice(&signed()).unwrap();
+        env["$v"] = 2.into();
+        let doc = serde_json::to_vec(&env).unwrap();
+        let err = decode(&doc, Some(&public_key())).unwrap_err();
         assert!(err.to_string().contains("version"), "{err}");
     }
 
     #[test]
     fn rejects_duplicate_members() {
-        let doc = r#"{"$v":1,"id":"a","id":"b","chains":[]}"#;
-        assert!(decode_document(doc.as_bytes(), None).is_err());
-        let nested = r#"{"$v":1,"id":"a","chains":[{"role":"Relay","role":"X"}]}"#;
-        assert!(decode_document(nested.as_bytes(), None).is_err());
+        let doc = descriptor_json().replacen(r#""id":"previewnet""#, r#""id":"a","id":"b""#, 1);
+        assert_ne!(doc, descriptor_json());
+        let err = decode(doc.as_bytes(), None).unwrap_err();
+        assert!(err.to_string().contains("duplicate"), "{err}");
     }
 
-    fn descriptor_with(f: impl FnOnce(&mut serde_json::Value)) -> Descriptor {
+    fn descriptor_with(
+        f: impl FnOnce(&mut serde_json::Value),
+    ) -> Result<Descriptor, anyhow::Error> {
         let mut v: serde_json::Value = serde_json::from_str(&descriptor_json()).unwrap();
         f(&mut v);
-        serde_json::from_value(v).unwrap()
+        decode(v.to_string().as_bytes(), None).map(|(d, _)| d)
     }
 
     #[test]
     fn validation_rules() {
-        let d = descriptor_with(|v| v["chains"][2]["role"] = "AssetHub".into());
-        assert!(d.validate(0).is_err(), "duplicate role");
-        let d = descriptor_with(|v| v["chains"][2]["paraId"] = 1500.into());
-        assert!(d.validate(0).is_err(), "duplicate para id");
-        let d = descriptor_with(|v| v["chains"][1]["role"] = "Relay".into());
-        assert!(d.validate(0).is_err(), "two relays");
-        let d = descriptor_with(|v| {
-            v["chains"][1].as_object_mut().unwrap().remove("paraId");
-        });
-        assert!(d.validate(0).is_err(), "para without id");
-        let d = descriptor_with(|v| v["chains"][1]["rpc"] = serde_json::json!([]));
-        assert!(d.validate(0).is_err(), "no rpc");
-        let d = descriptor_with(|v| v["expiresAt"] = 100.into());
-        assert!(d.validate(100).is_err(), "expired");
-        assert!(d.validate(99).is_ok());
-        let d = descriptor_with(|v| v["$v"] = 2.into());
-        assert!(d.validate(0).is_err(), "version");
+        assert!(
+            descriptor_with(|v| v["chains"][2]["role"] = "AssetHub".into()).is_err(),
+            "duplicate role"
+        );
+        assert!(
+            descriptor_with(|v| v["chains"][2]["paraId"] = 1500.into()).is_err(),
+            "duplicate para id"
+        );
+        assert!(
+            descriptor_with(|v| v["chains"][1]["role"] = "Relay".into()).is_err(),
+            "two relays"
+        );
+        assert!(
+            descriptor_with(|v| {
+                v["chains"][1].as_object_mut().unwrap().remove("paraId");
+            })
+            .is_err(),
+            "para without id"
+        );
+        assert!(
+            descriptor_with(|v| v["chains"][1]["rpc"] = serde_json::json!([])).is_err(),
+            "no rpc"
+        );
+        assert!(
+            descriptor_with(|v| v["chains"][1]["rpc"] = serde_json::json!(["ws://a.example"]))
+                .is_err(),
+            "insecure rpc"
+        );
+    }
+
+    #[test]
+    fn refuses_an_expired_stack() {
+        let mut v: serde_json::Value = serde_json::from_str(&descriptor_json()).unwrap();
+        v["expiresAt"] = 100.into();
+        let bytes = v.to_string().into_bytes();
+        let err = decode_document(&bytes, &pointer(None), 100).unwrap_err();
+        assert!(err.to_string().contains("expired"), "{err}");
+        assert!(decode_document(&bytes, &pointer(None), 99).is_ok());
     }
 
     #[test]
     fn selects_chains() {
-        let d = descriptor_with(|_| {});
+        let d = descriptor_with(|_| {}).unwrap();
         // People has no fullSpec: skipped by default
         let all = select_chains(&d, None).unwrap();
         assert_eq!(
@@ -1256,7 +1021,7 @@ mod tests {
         ))
         .unwrap();
         let stack = user.stack.as_ref().unwrap();
-        Pointer::parse(&stack.pointer, stack.key.as_deref()).unwrap();
+        StackPointer::parse(&stack.pointer, stack.key.as_deref()).unwrap();
         let merged = merge_user_config(derived(), Some(&user)).unwrap();
         assert_eq!(merged.parachains.unwrap()[0].cores, Some(3));
     }

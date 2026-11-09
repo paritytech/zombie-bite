@@ -17,7 +17,9 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
   chain-specs come from the descriptor, the signature is checked when the
   pointer carries a key, and each para's cores are read from the relay.
   `--stack-chains` bites a subset, and `zombie-bite stack-config` prints the
-  derived config without biting ([#163]).
+  derived config without biting ([#163]). The descriptor is read with the
+  `trinity-stack` crate, so it is accepted and refused by the same rules as
+  every other reader.
 - `[relaychain]` takes a `chain_spec`, so a custom relay can be written in a
   config file, and `[[parachains]]` takes a `role`.
 
