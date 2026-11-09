@@ -30,7 +30,6 @@ array-bytes = "6.2"
 codec = { package = "parity-scale-codec", version = "3.6.12", default-features = false, features = ["derive"] }
 futures = "0.3"
 hex = "0.4"
-scale-value = "0.16"
 scale-info = { version = "2.11", default-features = false }
 tar = "0.4"
 flate2 = "1.0"

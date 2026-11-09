@@ -52,6 +52,7 @@ async fn rc_epoch_duration(relaychain: &Relaychain) -> u64 {
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 pub async fn sync_relay_only(
     ns: DynNamespace,
     cmd: impl AsRef<str>,
