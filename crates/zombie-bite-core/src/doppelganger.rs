@@ -479,13 +479,14 @@ pub async fn bite(
     )
     .await;
 
-    let manifest = build_manifest(
+    let mut manifest = build_manifest(
         &relay_chain,
         &paras_to,
         &ready_content,
         &relay_artifacts,
         &para_artifacts,
     );
+    manifest.stack = opts.stack.clone();
     manifest.write(&global_base_dir).await?;
 
     clean_up_dir_for_step(global_base_dir, Step::Bite, &relay_chain, &paras_to).await?;
@@ -563,6 +564,7 @@ fn build_manifest(
         created_at: manifest::now_unix(),
         relay,
         parachains,
+        stack: None,
     }
 }
 

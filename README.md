@@ -186,6 +186,26 @@ The name is what the artifacts are named after, the endpoint is what the bite re
 
 A relay name that is not one of `polkadot`, `kusama`, `paseo` or `westend` is treated as a custom relay rather than silently falling back to polkadot.
 
+#### Forking a Trinity stack
+
+A [Trinity stack descriptor](https://github.com/paritytech/trinity-user-agents/blob/main/docs/rfcs/trinity-stack-descriptor.md) lists every chain of a stack with its role, para id, genesis hash, RPC endpoints and chain-spec. `--stack` takes one, as a descriptor url, a local file or a `polkadotapp://stack?url=...&key=...` link, and bites its relay and parachains with nothing else on the command line:
+
+```sh
+zombie-bite bite -d /tmp/previewnet-fork --and-spawn \
+  --stack https://previewnet.substrate.dev/.well-known/trinity-stack.json
+
+# only some of its chains (the relay is always bitten)
+zombie-bite bite -d /tmp/previewnet-fork --stack <pointer> --stack-chains AssetHub,People
+```
+
+- The signature is checked when the link carries a `key` (or with `--stack-key 0x...`); such a pointer only accepts a signed descriptor that verifies. Without a key a signed descriptor is read unchecked, with a warning.
+- Each chain's endpoint is the first of its `rpc` list that serves the descriptor's genesis hash. Its full chain-spec is downloaded to `<base_path>/stack/` and checked against the descriptor's sha256.
+- Each para's cores are read from the relay (`ParachainHost_claim_queue`, at `--rc-bite-at` when set). `--para-cores` and a config file's `cores` win over them.
+- The chain playing the `AssetHub` role keeps Asset Hub's overrides (e.g. `Staking::ForceEra`) whatever its para id. A custom relay's epoch length is read from `Babe::EpochDuration`.
+- The config derived from the stack is written to `<base_path>/stack-config.toml`; `zombie-bite bite -c` on it re-runs the same bite without the stack. `zombie-bite stack-config --stack <pointer>` prints it without biting.
+
+In a config file the stack goes in a `[stack]` table; `[relaychain]` and `[[parachains]]` then only override the stack's chains, matched by `role` (or `id`). See [stack.toml](./examples/stack.toml).
+
 #### Cores and messaging state
 
 - `--para-cores <para_id>=<cores>` overrides how many cores a parachain gets (defaults mirror the live networks, e.g. asset-hub takes 3 for elastic scaling). The relay's validator count follows the total.

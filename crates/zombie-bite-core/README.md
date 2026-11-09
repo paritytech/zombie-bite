@@ -8,6 +8,9 @@ The flow mirrors the cli subcommands:
 
 1. **resolve** the settings from an optional config file plus overrides
    (`resolve::resolve_bite_config`), the same way the cli merges its flags.
+   To bite a Trinity stack from its descriptor use the async
+   `resolve::resolve_bite_config_with_stack`, which reads the stack (see
+   `stack`) and derives the relay and parachains from it.
 2. **bite** (`bite`): sync the live network with `doppelganger` nodes, apply
    the state overrides and write the artifacts (chain-specs, snapshots,
    manifest) to a base path.

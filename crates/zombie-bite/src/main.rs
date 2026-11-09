@@ -3,7 +3,7 @@ use std::path::{Path, PathBuf};
 use anyhow::bail;
 use clap::Parser;
 use tokio::fs;
-use tracing::{debug, level_filters::LevelFilter};
+use tracing::{debug, info, level_filters::LevelFilter};
 use tracing_subscriber::EnvFilter;
 
 use zombie_bite_core::{
@@ -15,9 +15,10 @@ use zombie_bite_core::{
         tear_down_and_generate, STOP_FILE,
     },
     resolve::{
-        get_base_path, resolve_bite_config, resolve_spawn_config, BiteOverrides, SpawnOverrides,
+        derive_stack_config, get_base_path, resolve_bite_config_with_stack, resolve_spawn_config,
+        BiteOverrides, SpawnOverrides,
     },
-    spawn, upgrade, verify,
+    spawn, stack, upgrade, verify,
 };
 
 mod cli;
@@ -55,12 +56,13 @@ async fn main() -> Result<(), anyhow::Error> {
             publish_bootnodes,
             doppelganger,
             doppelganger_parachain,
+            stack,
         } => {
             if with_monitor && !and_spawn {
                 bail!("--with-monitor can only be used with --and-spawn");
             }
 
-            let resolved_config = resolve_bite_config(
+            let resolved_config = resolve_bite_config_with_stack(
                 config,
                 BiteOverrides {
                     relay,
@@ -78,8 +80,12 @@ async fn main() -> Result<(), anyhow::Error> {
                     publish_bootnodes,
                     doppelganger,
                     doppelganger_parachain,
+                    stack: stack.stack,
+                    stack_key: stack.stack_key,
+                    stack_chains: stack.stack_chains,
                 },
-            )?;
+            )
+            .await?;
 
             debug!("{:?}", resolved_config.relaychain);
             bite(
@@ -125,6 +131,40 @@ async fn main() -> Result<(), anyhow::Error> {
                     resolved_config.publish_bootnodes,
                 )
                 .await?;
+            }
+        }
+        Commands::StackConfig {
+            config,
+            stack: stack_args,
+            base_path,
+            relay_bite_at,
+            out,
+        } => {
+            let overrides = BiteOverrides {
+                base_path,
+                relay_bite_at,
+                stack: stack_args.stack,
+                stack_key: stack_args.stack_key,
+                stack_chains: stack_args.stack_chains,
+                ..Default::default()
+            };
+            let Some((derived, source)) = derive_stack_config(config, &overrides).await? else {
+                bail!("no stack to read: pass --stack or a config file with a [stack] table");
+            };
+            info!(
+                "stack '{}' from {} (sequence {}, signature {})",
+                source.id,
+                source.source,
+                source.sequence,
+                if source.signature_verified {
+                    "verified"
+                } else {
+                    "not checked"
+                }
+            );
+            match out {
+                Some(out) => stack::write_config(&derived, Path::new(&out)).await?,
+                None => print!("{}", stack::config_to_toml(&derived)?),
             }
         }
         Commands::Spawn {
