@@ -190,6 +190,56 @@ impl<'a> OverrideSet<'a> {
     }
 }
 
+/// Account of `//Alice`, the default sudo key of a bitten chain.
+const ALICE_ACCOUNT: &str = "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d";
+
+/// Free balance given to the sudo account: 10M units at 10 decimals.
+pub const SUDO_FREE_BALANCE: u128 = 10_000_000 * 10u128.pow(10);
+
+/// `ExtraFlags` of an account created under the current balances logic.
+const ACCOUNT_FLAGS_NEW_LOGIC: u128 = 1 << 127;
+
+/// `System::Account` entry for `account` (32 bytes, hex with or without
+/// `0x`) holding `free` and nothing else: the map key suffix
+/// (`blake2_128_concat` of the account) and the encoded `AccountInfo`
+/// (nonce, consumers, providers, sufficients and the balances'
+/// `AccountData { free, reserved, frozen, flags }`). The account gets one
+/// provider so it exists without depending on anything else.
+pub fn free_balance_account(account: &str, free: u128) -> Result<(String, String), anyhow::Error> {
+    let bytes: [u8; 32] = hex::decode(account.trim_start_matches("0x"))
+        .map_err(|e| anyhow::anyhow!("account '{account}' is not hex: {e}"))?
+        .try_into()
+        .map_err(|b: Vec<u8>| {
+            anyhow::anyhow!("account '{account}' is {} bytes, expected 32", b.len())
+        })?;
+    let key_suffix = hex::encode(subhasher::blake2_128_concat(bytes));
+    let account_info = (
+        0u32, // nonce
+        0u32, // consumers
+        1u32, // providers
+        0u32, // sufficients
+        (free, 0u128, 0u128, ACCOUNT_FLAGS_NEW_LOGIC),
+    );
+    Ok((key_suffix, hex::encode(account_info.encode())))
+}
+
+/// Give the sudo account [`SUDO_FREE_BALANCE`], so it can pay for its calls
+/// whatever it held on the live chain. Injected, so the account is written
+/// even when it does not exist in the imported state, replacing it if it does.
+///
+/// Only a chain with the Sudo pallet has a sudo account: when the metadata
+/// shows no `Sudo::Key` nothing is funded. Without metadata the account is
+/// funded, as `Sudo::Key` itself is then set unchecked.
+fn fund_sudo(set: &mut OverrideSet, sudo: &str) -> Result<(), anyhow::Error> {
+    if set.meta.is_some_and(|meta| !meta.has_item("Sudo", "Key")) {
+        info!("no Sudo pallet in the runtime, the sudo account is not funded");
+        return Ok(());
+    }
+    let (key_suffix, account_info) = free_balance_account(sudo, SUDO_FREE_BALANCE)?;
+    set.inject_map("System", "Account", &key_suffix, account_info);
+    Ok(())
+}
+
 /// Seed `System::AuthorizedUpgrade` with the blob's hash, the state a passed
 /// `authorize_upgrade(hash)` referendum leaves behind. The permissionless
 /// `apply_authorized_upgrade(blob)` can then enact the upgrade through the
@@ -421,11 +471,7 @@ fn generate_rc_overrides(
         "NextKeys",
         format!("{validator_count_hex}{authority_discovery_keys}"),
     );
-    set.set(
-        "Sudo",
-        "Key",
-        "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
-    );
+    set.set("Sudo", "Key", ALICE_ACCOUNT);
 }
 
 fn augment_overrides_for_paras(
@@ -607,19 +653,17 @@ pub async fn generate_default_overrides_for_rc(
     set.inject_raw("c57d82d01f0fc18afc048ca20ac460dd", "01");
 
     // RcMigrator Manager (set //Alice by default)
-    set.inject(
-        "RcMigrator",
-        "Manager",
-        "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
-    );
+    set.inject("RcMigrator", "Manager", ALICE_ACCOUNT);
 
     freeze_ah_client(&mut set, meta).await?;
 
     // update the overrides / injects map to use IFF the key is provided
-    if let Ok(sudo_key) = env::var("ZOMBIE_SUDO") {
-        set.set_required("Sudo", "Key", &sudo_key);
-        set.inject("RcMigrator", "Manager", &sudo_key);
+    let sudo_key = env::var("ZOMBIE_SUDO").ok();
+    if let Some(sudo_key) = &sudo_key {
+        set.set_required("Sudo", "Key", sudo_key);
+        set.inject("RcMigrator", "Manager", sudo_key);
     }
+    fund_sudo(&mut set, sudo_key.as_deref().unwrap_or(ALICE_ACCOUNT))?;
 
     if let Some(override_wasm) = relay.wasm_overrides() {
         let wasm_content = read_wasm(override_wasm, "override_wasm").await?;
@@ -690,11 +734,13 @@ pub async fn generate_default_overrides_for_para(
     set.set("Aura", "Authorities", format!("04{key_to_use}"));
     set.set("AuraExt", "Authorities", format!("04{key_to_use}"));
     set.set("CollatorSelection", "DesiredCandidates", "01000000");
-    set.set(
-        "Sudo",
-        "Key",
-        "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
-    );
+    set.set("Sudo", "Key", ALICE_ACCOUNT);
+
+    let sudo_key = env::var("ZOMBIE_SUDO").ok();
+    if let Some(sudo_key) = &sudo_key {
+        set.set_required("Sudo", "Key", sudo_key);
+    }
+    fund_sudo(&mut set, sudo_key.as_deref().unwrap_or(ALICE_ACCOUNT))?;
 
     if para.is_asset_hub() {
         // Staking runs on Asset Hub: never plan a new era, so no election is
@@ -1025,6 +1071,39 @@ mod test {
     }
 
     #[test]
+    fn sudo_account_gets_a_free_balance() {
+        let (suffix, value) = free_balance_account(ALICE_ACCOUNT, SUDO_FREE_BALANCE).unwrap();
+        // blake2_128(alice) ++ alice, the key polkadot-js shows for System.Account(//Alice)
+        assert_eq!(
+            format!("{}{suffix}", storage_key("System", "Account")),
+            "26aa394eea5630e07c48ae0c9558cef7b99d880ec681799c0cf30e8886371da9de1e86a9a8c739864cf3cc5ec2bea59fd43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d"
+        );
+        assert_eq!(SUDO_FREE_BALANCE, 100_000_000_000_000_000);
+        let bytes = hex::decode(&value).unwrap();
+        assert_eq!(bytes.len(), 16 + 4 * 16);
+        assert_eq!(&bytes[8..12], &1u32.to_le_bytes(), "one provider");
+        assert_eq!(
+            u128::from_le_bytes(bytes[16..32].try_into().unwrap()),
+            SUDO_FREE_BALANCE
+        );
+        assert_eq!(
+            u128::from_le_bytes(bytes[64..80].try_into().unwrap()),
+            1 << 127,
+            "new-logic flags"
+        );
+        // 0x-prefixed accounts are accepted, short ones refused
+        assert!(free_balance_account(&format!("0x{ALICE_ACCOUNT}"), 1).is_ok());
+        assert!(free_balance_account("d435", 1).is_err());
+
+        let mut set = OverrideSet::new(None);
+        fund_sudo(&mut set, ALICE_ACCOUNT).unwrap();
+        assert_eq!(
+            set.injects[format!("{}{suffix}", storage_key("System", "Account"))],
+            value
+        );
+    }
+
+    #[test]
     fn keep_messaging_state_leaves_channels_alone() {
         let validator_keys = get_validator_keys(2);
         let para = crate::config::Parachain::new("asset-hub");
@@ -1207,6 +1286,34 @@ mod test {
             }
             Ok(())
         }
+    }
+
+    #[test]
+    fn sudo_is_funded_only_with_the_sudo_pallet() {
+        let account_key = |set: &OverrideSet| {
+            set.injects
+                .as_object()
+                .unwrap()
+                .keys()
+                .any(|k| k.starts_with(&storage_key("System", "Account")))
+        };
+
+        let with_sudo = FakeRuntime {
+            present: vec![("Sudo", "Key"), ("System", "Account")],
+            bad_value: "",
+        };
+        let mut set = OverrideSet::new(Some(&with_sudo));
+        fund_sudo(&mut set, ALICE_ACCOUNT).unwrap();
+        assert!(account_key(&set), "funded with the Sudo pallet");
+
+        let without_sudo = FakeRuntime {
+            present: vec![("System", "Account")],
+            bad_value: "",
+        };
+        let mut set = OverrideSet::new(Some(&without_sudo));
+        fund_sudo(&mut set, ALICE_ACCOUNT).unwrap();
+        assert!(!account_key(&set), "not funded without the Sudo pallet");
+        assert!(set.finish("test").is_ok());
     }
 
     #[test]

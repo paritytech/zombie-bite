@@ -39,6 +39,8 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
   refused before syncing instead of warned about ([#165]).
 - A custom relay's epoch length is read from its runtime
   (`Babe::EpochDuration`) instead of assumed to be 600 slots.
+- Bump `spin` from 0.9.8, which is yanked on crates.io, to 0.9.9 in
+  `Cargo.lock`. It is pulled in through `wasmi`.  
 
 ## [0.6.5] - 2026-11-06
 
