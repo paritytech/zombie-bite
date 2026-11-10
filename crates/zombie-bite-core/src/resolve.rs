@@ -204,7 +204,8 @@ fn stack_to_bite(
 /// Derive the bite config of a Trinity stack: read and check its descriptor,
 /// download the chain-specs under the base path, merge the config file's
 /// `[relaychain]` / `[[parachains]]` on top, and fill each para's core count
-/// not set there (read from the relay, see [`crate::cores`]).
+/// not set there from the relay's claim queue (falling back to the built-in
+/// defaults when the relay can't be read).
 /// Returns `None` when no stack is set.
 pub async fn derive_stack_config(
     config_path: Option<String>,
