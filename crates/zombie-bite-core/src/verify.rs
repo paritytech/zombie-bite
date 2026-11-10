@@ -12,6 +12,8 @@ use zombienet_sdk::{
     LocalFileSystem, Network, NetworkNode,
 };
 
+use crate::rpc::rpc_client;
+
 const FINALIZED_METRIC: &str = "block_height{status=\"finalized\"}";
 /// Blocks past the bite block at which fork and source hashes are compared.
 const DIVERGENCE_OFFSET: u64 = 5;
@@ -95,7 +97,7 @@ pub async fn assert_diverged(
         tokio::time::sleep(Duration::from_secs(6)).await;
     };
 
-    let source = match RpcClient::from_url(source_rpc_url).await {
+    let source = match rpc_client(source_rpc_url).await {
         Ok(client) => client,
         Err(e) => {
             warn!("{chain}: source {source_rpc_url} unreachable, skipping divergence check: {e}");

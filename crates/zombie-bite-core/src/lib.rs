@@ -15,6 +15,7 @@ mod doppelganger;
 mod metadata;
 mod monit;
 mod overrides;
+mod rpc;
 mod sync;
 mod utils;
 

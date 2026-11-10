@@ -20,11 +20,12 @@ use std::{
 
 use anyhow::{anyhow, bail};
 use tracing::{info, warn};
-use zombienet_sdk::subxt::ext::subxt_rpcs::{client::RpcParams, RpcClient};
+use zombienet_sdk::subxt::ext::subxt_rpcs::client::RpcParams;
 
 use crate::{
     config::{num_validators_for_cores, CoresOverride, Parachain, Relaychain},
     metadata::claim_queue_cores,
+    rpc::rpc_client,
 };
 
 /// Cores the fork's validator set (capped at 7: one per core plus a spare)
@@ -203,15 +204,6 @@ pub(crate) async fn resolve_cores(
         .into_iter()
         .map(|a| (a.para_id, a.cores))
         .collect())
-}
-
-async fn rpc_client(url: &str) -> Result<RpcClient, anyhow::Error> {
-    let client = if url.starts_with("ws://") {
-        RpcClient::from_insecure_url(url).await?
-    } else {
-        RpcClient::from_url(url).await?
-    };
-    Ok(client)
 }
 
 /// Cores per para id on the relay, from `ParachainHost_claim_queue`.

@@ -25,9 +25,12 @@ use serde::{Deserialize, Serialize};
 use tokio::fs;
 use tracing::{info, warn};
 use trinity_stack::{accept, Chain, Descriptor, Document, Fetched, Pointer};
-use zombienet_sdk::subxt::ext::subxt_rpcs::{client::RpcParams, RpcClient};
+use zombienet_sdk::subxt::ext::subxt_rpcs::client::RpcParams;
 
-use crate::config::{ParachainConfig, RelaychainConfig, StackConfig, ZombieBiteConfig};
+use crate::{
+    config::{ParachainConfig, RelaychainConfig, StackConfig, ZombieBiteConfig},
+    rpc::rpc_client,
+};
 
 /// Role of the relay chain in a descriptor.
 pub const ROLE_RELAY: &str = "Relay";
@@ -496,15 +499,6 @@ async fn pick_endpoint(chain: &Chain) -> Result<String, anyhow::Error> {
         chain.role,
         errors.join("; ")
     )
-}
-
-async fn rpc_client(url: &str) -> Result<RpcClient, anyhow::Error> {
-    let client = if url.starts_with("ws://") {
-        RpcClient::from_insecure_url(url).await?
-    } else {
-        RpcClient::from_url(url).await?
-    };
-    Ok(client)
 }
 
 async fn genesis_hash(url: &str) -> Result<String, anyhow::Error> {

@@ -15,6 +15,8 @@ use zombienet_sdk::subxt::{
     Metadata,
 };
 
+use crate::rpc::rpc_client;
+
 /// Cores per para id from the relay's `ParachainHost_claim_queue` (a SCALE
 /// `BTreeMap<CoreIndex, VecDeque<ParaId>>`). Each core goes to the para that
 /// holds most of its queue (the first one to appear on a tie), so a core shared
@@ -87,7 +89,7 @@ impl ChainMetadata {
     /// access to the source falls back to unverified overrides rather than
     /// failing outright.
     pub async fn fetch(chain: &str, url: &str, at_block: Option<u32>) -> Option<Self> {
-        let rpc = match RpcClient::from_url(url).await {
+        let rpc = match rpc_client(url).await {
             Ok(rpc) => rpc,
             Err(e) => {
                 warn!("{chain}: can't reach {url}, overrides will not be verified against the runtime: {e}");
