@@ -31,8 +31,9 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 ### Changed
 
 - Every bitten para's core count is read from the relay's claim queue (at
-  `--rc-bite-at` when set), not only a stack's: system paras no longer use
-  hard-coded counts, and a `custom%` para or `type = "custom"` entry without
+  `--rc-bite-at` when set), not only a stack's: system paras also get the
+  count from relay-chain and hard-coded counts are just keep as fallback,
+   and a `custom%` para or `type = "custom"` entry without
   `req_cores` / `cores` gets its live count instead of 1. `--para-cores` and
   config counts still win; the old counts are the fallback when the relay
   can't be read. A bite needing more cores than the fork can back (6) is now
