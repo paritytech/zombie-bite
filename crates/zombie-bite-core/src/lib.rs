@@ -10,6 +10,7 @@ pub mod upgrade;
 pub mod verify;
 
 mod bootnodes;
+mod cores;
 mod doppelganger;
 mod metadata;
 mod monit;

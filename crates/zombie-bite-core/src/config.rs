@@ -340,6 +340,9 @@ fn ensure_executable(path: &str) -> Result<(), anyhow::Error> {
     Ok(())
 }
 
+/// Cores `para` gets: the resolved count in `override_` (filled for every para
+/// by [`crate::cores::resolve_cores`]), else the explicit `req_cores`, else the
+/// built-in default.
 pub(crate) fn get_assigned_cores(
     relay: &Relaychain,
     para: &Parachain,
@@ -348,15 +351,8 @@ pub(crate) fn get_assigned_cores(
     if let Some(cores) = override_.get(&para.id()) {
         return *cores;
     }
-    match para {
-        Parachain::AssetHub { .. } => 3,
-        Parachain::People { .. } => match relay {
-            Relaychain::Polkadot { .. } | Relaychain::Westend { .. } => 3,
-            _ => 1,
-        },
-        Parachain::Custom { cores, .. } => *cores,
-        _ => 1,
-    }
+    para.req_cores()
+        .unwrap_or_else(|| crate::cores::builtin_cores(relay, para))
 }
 
 #[derive(Debug, PartialEq, Clone)]
@@ -625,7 +621,9 @@ pub enum Parachain {
         maybe_rpc_endpoint: MaybeSyncUrl,
         chain_spec: String,
         id: u32,
-        cores: u32,
+        /// Cores set explicitly (`req_cores` / config `cores`); `None` reads
+        /// them from the relay.
+        cores: Option<u32>,
         name: String,
         /// Role of the chain in its stack (e.g. `AssetHub`), when known. Lets a
         /// system chain that runs under a non-standard para id (a Trinity
@@ -664,8 +662,8 @@ impl Parachain {
                 maybe_rpc_endpoint: None,
                 name: "custom".to_string(), // placeholder
                 chain_spec: chain.to_string(),
-                id: 2000, // placeholder
-                cores: 1, // placeholder
+                id: 2000,    // placeholder
+                cores: None, // read from the relay
                 role: None,
             },
         }
@@ -743,7 +741,7 @@ impl Parachain {
 
     pub fn req_cores(&self) -> Option<u32> {
         match self {
-            Parachain::Custom { cores, .. } => Some(*cores),
+            Parachain::Custom { cores, .. } => *cores,
             _ => None,
         }
     }
@@ -1048,7 +1046,8 @@ pub struct ParachainConfig {
     pub id: Option<u32>,
     // Parachain chain-spec (or full chain name). Used for custom.
     pub chain_spec: Option<String>,
-    /// Number of cores to assign, NOTE: only used in `custom` paras
+    /// Number of cores to assign. Unset: read from the relay's claim queue,
+    /// falling back to the built-in default.
     pub cores: Option<u32>,
     /// Role of the chain in a Trinity stack (e.g. `AssetHub`). In a stack
     /// bite it selects the stack chain this entry overrides.
@@ -1110,7 +1109,7 @@ impl ParachainConfig {
                     name: format!("custom-{}", id),
                     chain_spec,
                     id,
-                    cores: self.cores.unwrap_or(1),
+                    cores: self.cores,
                     role: self.role.clone(),
                 })
             }
@@ -1801,7 +1800,7 @@ network = "polkadot"
             maybe_override: None,
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
-            cores: 0,
+            cores: Some(0),
             role: None,
         };
         assert_eq!(para.id(), 3392);
@@ -1816,7 +1815,7 @@ network = "polkadot"
             maybe_override: None,
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
-            cores: 1,
+            cores: Some(1),
             role: None,
         };
         assert_eq!(para.as_chain_string("kusama"), "3392-kusama");
@@ -1832,7 +1831,7 @@ network = "polkadot"
             maybe_override: None,
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
-            cores: 1,
+            cores: Some(1),
             role: None,
         };
         assert_eq!(para.chain_spec_path(), Some("/path/to/spec.json"));
@@ -1977,7 +1976,7 @@ chain_spec = "/path/to/yap-3392-raw-chain-spec.json"
             maybe_override: None,
             maybe_bite_at: None,
             maybe_rpc_endpoint: Some("wss://example.com".to_string()),
-            cores: 1,
+            cores: Some(1),
             role: None,
         }];
 

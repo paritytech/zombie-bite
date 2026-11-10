@@ -16,7 +16,6 @@
 //! descriptors as every other reader.
 
 use std::{
-    collections::BTreeMap,
     path::{Path, PathBuf},
     time::Duration,
 };
@@ -28,10 +27,7 @@ use tracing::{info, warn};
 use trinity_stack::{accept, Chain, Descriptor, Document, Fetched, Pointer};
 use zombienet_sdk::subxt::ext::subxt_rpcs::{client::RpcParams, RpcClient};
 
-use crate::{
-    config::{ParachainConfig, RelaychainConfig, StackConfig, ZombieBiteConfig},
-    metadata::claim_queue_cores,
-};
+use crate::config::{ParachainConfig, RelaychainConfig, StackConfig, ZombieBiteConfig};
 
 /// Role of the relay chain in a descriptor.
 pub const ROLE_RELAY: &str = "Relay";
@@ -215,12 +211,11 @@ pub struct StackBite {
 
 /// Read the stack `stack` points to and derive the bite config: endpoints
 /// checked against each chain's genesis hash, chain-specs downloaded to
-/// `<base_path>/stack` and checked against their digests, and each para's
-/// core count read from the relay (at `relay_bite_at` when set).
+/// `<base_path>/stack` and checked against their digests. Core counts are left
+/// unset, to be read from the relay when the bite is resolved.
 pub async fn materialize(
     stack: &StackConfig,
     base_path: &Path,
-    relay_bite_at: Option<u32>,
 ) -> Result<StackBite, anyhow::Error> {
     let pointer = StackPointer::parse(&stack.pointer, stack.key.as_deref())?;
     info!("📚 reading stack descriptor from {}", pointer.source);
@@ -250,38 +245,14 @@ pub async fn materialize(
     let relay_spec = download_spec(&http, relay, &spec_dir, &relay_name).await?;
     let relay_spec_id = spec_id(&relay_spec).await?;
 
-    let cores = match relay_core_counts(&relay_rpc, relay_bite_at).await {
-        Ok(cores) => Some(cores),
-        Err(e) => {
-            warn!("can't read the core assignments of '{relay_name}' ({e}); every para gets 1 core unless set with --para-cores or `cores`");
-            None
-        }
-    };
-
     let mut parachains = vec![];
-    let mut total_cores = 0;
     for chain in chains {
         let para_id = chain.para_id.expect("validated");
         let rpc = pick_endpoint(chain).await?;
         let spec = download_spec(&http, chain, &spec_dir, &relay_name).await?;
         check_para_spec(&spec, para_id, &relay_spec_id).await?;
 
-        let para_cores = match cores.as_ref().map(|c| c.get(&para_id).copied()) {
-            Some(Some(n)) => n,
-            Some(None) => {
-                warn!(
-                    "para {para_id} ({}) has no core on the relay, giving it 1",
-                    chain.role
-                );
-                1
-            }
-            None => 1,
-        };
-        info!(
-            "🧩 {} (para {para_id}): {para_cores} core(s), rpc {rpc}",
-            chain.role
-        );
-        total_cores += para_cores;
+        info!("🧩 {} (para {para_id}): rpc {rpc}", chain.role);
 
         parachains.push(ParachainConfig {
             parachain_type: "custom".into(),
@@ -292,14 +263,13 @@ pub async fn materialize(
             rpc_endpoint: Some(rpc),
             id: Some(para_id),
             chain_spec: Some(spec.to_string_lossy().to_string()),
-            cores: Some(para_cores),
+            // read from the relay when the bite is resolved
+            cores: None,
             role: Some(chain.role.clone()),
             command: None,
             image: None,
         });
     }
-
-    info!("🧩 the stack's paras use {total_cores} core(s) on the relay");
 
     let config = ZombieBiteConfig {
         relaychain: RelaychainConfig {
@@ -545,26 +515,6 @@ async fn genesis_hash(url: &str) -> Result<String, anyhow::Error> {
     params.push(0u32)?;
     let hash: Option<String> = rpc.request("chain_getBlockHash", params).await?;
     hash.ok_or_else(|| anyhow!("no genesis block"))
-}
-
-/// Cores per para id on the relay, from `ParachainHost_claim_queue`.
-async fn relay_core_counts(
-    url: &str,
-    at_block: Option<u32>,
-) -> Result<BTreeMap<u32, u32>, anyhow::Error> {
-    let rpc = rpc_client(url).await?;
-    let mut params = RpcParams::new();
-    params.push("ParachainHost_claim_queue")?;
-    params.push("0x")?;
-    if let Some(block) = at_block {
-        let mut hash_params = RpcParams::new();
-        hash_params.push(block)?;
-        let hash: Option<String> = rpc.request("chain_getBlockHash", hash_params).await?;
-        params.push(hash.ok_or_else(|| anyhow!("no block {block} on the relay"))?)?;
-    }
-    let raw: String = rpc.request("state_call", params).await?;
-    let bytes = hex::decode(raw.trim_start_matches("0x"))?;
-    claim_queue_cores(&bytes)
 }
 
 /// Download `chain`'s full chain-spec into `dir`, reusing a copy already there

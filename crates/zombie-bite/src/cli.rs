@@ -55,7 +55,8 @@ pub enum Commands {
         #[arg(long, default_value_t = false, verbatim_doc_comment)]
         keep_messaging_state: bool,
         /// Override the cores assigned to a parachain, format: <para_id>=<cores>
-        /// Can be set multiple times, once per para.
+        /// Can be set multiple times, once per para. Paras without one (or a config
+        /// `cores` / custom `req_cores`) get their live count from the relay.
         #[arg(long = "para-cores", verbatim_doc_comment)]
         para_cores: Vec<String>,
         /// Advertise this run's own nodes as bootNodes in the published

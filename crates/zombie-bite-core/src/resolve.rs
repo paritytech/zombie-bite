@@ -3,6 +3,7 @@
 
 use anyhow::{anyhow, bail};
 use std::{
+    collections::BTreeSet,
     env,
     path::PathBuf,
     str::FromStr,
@@ -11,10 +12,13 @@ use std::{
 use tracing::{info, trace, warn};
 
 use crate::config::{
-    get_assigned_cores, BiteOptions, CoresOverride, DoppelgangerSetup, Parachain, Relaychain,
-    SpawnSetup, StackConfig, Upgrades, ZombieBiteConfig,
+    BiteOptions, CoresOverride, DoppelgangerSetup, Parachain, Relaychain, SpawnSetup, StackConfig,
+    Upgrades, ZombieBiteConfig,
 };
-use crate::stack::{self, StackSource};
+use crate::{
+    cores,
+    stack::{self, StackSource},
+};
 
 const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];
 
@@ -110,6 +114,9 @@ pub struct ResolvedBiteConfig {
     pub spawn_setup: SpawnSetup,
     pub publish_bootnodes: Option<String>,
     pub opts: BiteOptions,
+    /// Para ids whose entry in `opts.cores` comes from `--para-cores` (the
+    /// rest come from the config), to log where each count came from.
+    pub cores_from_cli: BTreeSet<u32>,
 }
 
 impl ResolvedBiteConfig {
@@ -195,10 +202,58 @@ fn stack_to_bite(
 }
 
 /// Derive the bite config of a Trinity stack: read and check its descriptor,
-/// download the chain-specs under the base path, read the core counts from the
-/// relay, and merge the config file's `[relaychain]` / `[[parachains]]` on top.
+/// download the chain-specs under the base path, merge the config file's
+/// `[relaychain]` / `[[parachains]]` on top, and fill each para's core count
+/// not set there (read from the relay, see [`crate::cores`]).
 /// Returns `None` when no stack is set.
 pub async fn derive_stack_config(
+    config_path: Option<String>,
+    overrides: &BiteOverrides,
+) -> Result<Option<(ZombieBiteConfig, StackSource)>, anyhow::Error> {
+    let Some((mut config, source)) =
+        derive_stack_config_without_cores(config_path, overrides).await?
+    else {
+        return Ok(None);
+    };
+
+    let resolved = resolve_bite_config_from(
+        Some(config.clone()),
+        BiteOverrides {
+            relay_bite_at: overrides.relay_bite_at,
+            ..Default::default()
+        },
+    )?;
+    let cores = cores::resolve_cores(
+        &resolved.relaychain,
+        &resolved.parachains,
+        &resolved.opts.cores,
+        &resolved.cores_from_cli,
+    )
+    .await?;
+    fill_unset_cores(&mut config, &cores)?;
+    Ok(Some((config, source)))
+}
+
+/// Record the resolved core counts in the `[[parachains]]` entries that set
+/// none, so the derived config re-runs the same bite.
+fn fill_unset_cores(
+    config: &mut ZombieBiteConfig,
+    cores: &CoresOverride,
+) -> Result<(), anyhow::Error> {
+    for para_cfg in config.parachains.iter_mut().flatten() {
+        if para_cfg.cores.is_some() {
+            continue;
+        }
+        if let Some(para) = para_cfg.to_parachain()? {
+            para_cfg.cores = cores.get(&para.id()).copied();
+        }
+    }
+    Ok(())
+}
+
+/// [`derive_stack_config`] leaving unset core counts unset, for the bite to
+/// resolve along with every other para.
+async fn derive_stack_config_without_cores(
     config_path: Option<String>,
     overrides: &BiteOverrides,
 ) -> Result<Option<(ZombieBiteConfig, StackSource)>, anyhow::Error> {
@@ -219,11 +274,7 @@ pub async fn derive_stack_config(
             .clone()
             .or_else(|| config_file.as_ref().and_then(|c| c.base_path.clone())),
     );
-    let bite_at = overrides
-        .relay_bite_at
-        .or_else(|| config_file.as_ref().and_then(|c| c.relaychain.bite_at));
-
-    let bite = stack::materialize(&stack, &base_path, bite_at).await?;
+    let bite = stack::materialize(&stack, &base_path).await?;
     let mut merged = stack::merge_user_config(bite.config, config_file.as_ref())?;
     // the chain-specs were downloaded there
     merged.base_path = Some(base_path.to_string_lossy().to_string());
@@ -237,10 +288,26 @@ pub async fn resolve_bite_config_with_stack(
     config_path: Option<String>,
     overrides: BiteOverrides,
 ) -> Result<ResolvedBiteConfig, anyhow::Error> {
-    let Some((config, source)) = derive_stack_config(config_path.clone(), &overrides).await? else {
-        return resolve_bite_config(config_path, overrides);
+    let Some((mut config, source)) =
+        derive_stack_config_without_cores(config_path.clone(), &overrides).await?
+    else {
+        let mut resolved = resolve_bite_config(config_path, overrides)?;
+        resolve_cores(&mut resolved).await?;
+        return Ok(resolved);
     };
 
+    let mut resolved = resolve_bite_config_from(
+        Some(config.clone()),
+        BiteOverrides {
+            stack: None,
+            stack_key: None,
+            stack_chains: None,
+            ..overrides
+        },
+    )?;
+    resolve_cores(&mut resolved).await?;
+
+    fill_unset_cores(&mut config, &resolved.opts.cores)?;
     let base_path = PathBuf::from(
         config
             .base_path
@@ -254,32 +321,23 @@ pub async fn resolve_bite_config_with_stack(
         base_path.join(stack::STACK_CONFIG_FILE).display()
     );
 
-    let mut resolved = resolve_bite_config_from(
-        Some(config),
-        BiteOverrides {
-            stack: None,
-            stack_key: None,
-            stack_chains: None,
-            ..overrides
-        },
-    )?;
-
-    let total: u32 = resolved
-        .parachains
-        .iter()
-        .map(|p| get_assigned_cores(&resolved.relaychain, p, &resolved.opts.cores))
-        .sum();
-    if total > MAX_BACKED_CORES {
-        warn!("the bite assigns {total} cores but the fork runs at most {} validators, so some cores may get no backing group; lower them with --para-cores or bite fewer chains with --stack-chains", MAX_BACKED_CORES + 1);
-    }
-
     resolved.opts.stack = Some(source);
     Ok(resolved)
 }
 
-/// Cores the fork's validator set (capped at 7: one per core plus a spare)
-/// can back.
-const MAX_BACKED_CORES: u32 = 6;
+/// Fill `opts.cores` for every para (explicit counts, else the relay's live
+/// assignment, else the built-in defaults) and refuse a bite the fork can't
+/// back, before anything is synced.
+async fn resolve_cores(resolved: &mut ResolvedBiteConfig) -> Result<(), anyhow::Error> {
+    resolved.opts.cores = cores::resolve_cores(
+        &resolved.relaychain,
+        &resolved.parachains,
+        &resolved.opts.cores,
+        &resolved.cores_from_cli,
+    )
+    .await?;
+    Ok(())
+}
 
 fn resolve_bite_config_from(
     config_file: Option<ZombieBiteConfig>,
@@ -490,6 +548,7 @@ fn resolve_bite_config_from(
     doppelganger_setup.validate()?;
     // Per-para cores: CLI entries win over the config file's `cores`.
     let mut cores: CoresOverride = CoresOverride::new();
+    let mut cores_from_cli = BTreeSet::new();
     if let Some(ref config) = config_file {
         for para_cfg in config.parachains.as_deref().unwrap_or_default() {
             if let (Some(c), Some(para)) = (para_cfg.cores, para_cfg.to_parachain()?) {
@@ -511,6 +570,7 @@ fn resolve_bite_config_from(
             bail!("--para-cores {id}=0: a parachain with no cores can't have blocks backed");
         }
         cores.insert(id, c);
+        cores_from_cli.insert(id);
     }
     // A core count for a para that is not part of the bite is a typo, not a
     // silently ignorable no-op.
@@ -547,6 +607,7 @@ fn resolve_bite_config_from(
             doppelganger: doppelganger_setup,
             stack: None,
         },
+        cores_from_cli,
     };
     resolved.validate()?;
     Ok(resolved)
@@ -643,13 +704,13 @@ fn resolve_custom_parachain(s: &str) -> Result<Parachain, anyhow::Error> {
     let rpc_endpoint = parts[2].to_string();
     let chain_spec = parts[3].to_string();
     let name = format!("custom-{}", para_id);
-    let req_cores = if parts.len() == 5 {
-        parts[4]
-            .parse()
-            .map_err(|_| anyhow!("Invalid req_cores '{}' in custom parachain", parts[4]))?
-    } else {
-        // default to 1 core
-        1
+    // Without `req_cores` the count is read from the relay.
+    let req_cores = match parts.get(4) {
+        Some(c) => Some(
+            c.parse()
+                .map_err(|_| anyhow!("Invalid req_cores '{}' in custom parachain", c))?,
+        ),
+        None => None,
     };
     Ok(Parachain::Custom {
         id: para_id,
@@ -705,7 +766,11 @@ mod test {
     fn custom_para_works_with_default_cores() {
         let s = "custom%3392%wss://kusama-yap-3392.example.com:1234%/path/to/chain-spec.json";
         let para = resolve_custom_parachain(s).unwrap();
-        assert_eq!(para.req_cores(), Some(1), "cores should match");
+        assert_eq!(
+            para.req_cores(),
+            None,
+            "cores should be read from the relay"
+        );
     }
 
     #[test]

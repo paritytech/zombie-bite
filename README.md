@@ -208,7 +208,8 @@ In a config file the stack goes in a `[stack]` table; `[relaychain]` and `[[para
 
 #### Cores and messaging state
 
-- `--para-cores <para_id>=<cores>` overrides how many cores a parachain gets (defaults mirror the live networks, e.g. asset-hub takes 3 for elastic scaling). The relay's validator count follows the total.
+- Each para's cores are read from the relay's `ParachainHost_claim_queue` (at `--rc-bite-at` when set, head otherwise), for system, `custom%` and stack paras alike. Precedence: `--para-cores <para_id>=<cores>` > config `cores` / custom `req_cores` > the relay > built-in defaults (used, with a warning, when the relay can't be read). A para with no core on the relay gets 1. The bite logs where each count came from.
+- The relay's validator count follows the total, capped at 7, so a bite needing more than 6 cores is refused before syncing; lower them with `--para-cores`.
 - `--keep-messaging-state` keeps the inherited HRMP/DMP state instead of clearing it. Only correct when the relay's parachains are exactly the ones being bitten, so both snapshots agree on channel heads; on a shared relay the mismatch makes cumulus panic with `HRMP head mismatch`.
 
 #### Overrides are checked against the runtime
