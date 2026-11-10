@@ -696,7 +696,7 @@ pub async fn generate_default_overrides_for_para(
         "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
     );
 
-    if matches!(para, Parachain::AssetHub { .. }) {
+    if para.is_asset_hub() {
         // Staking runs on Asset Hub: never plan a new era, so no election is
         // started and no validator set is sent to the relay chain.
         set.inject("Staking", "ForceEra", force_none(meta)?);

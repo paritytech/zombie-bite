@@ -10,10 +10,30 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+### Added
+
+- Bite a Trinity stack from its descriptor with `--stack <url|file|polkadotapp://stack link>`
+  (or a `[stack]` table): the relay and parachains, their endpoints and
+  chain-specs come from the descriptor, the signature is checked when the
+  pointer carries a key, and each para's cores are read from the relay.
+  `--stack-chains` bites a subset, and `zombie-bite stack-config` prints the
+  derived config without biting ([#163]). The descriptor is read with the
+  `trinity-stack` crate, so it is accepted and refused by the same rules as
+  every other reader.
+- `[relaychain]` takes a `chain_spec`, so a custom relay can be written in a
+  config file, and `[[parachains]]` takes a `role`.
+
+### Fixed
+
+- The parachain sync nodes of a custom relay start their relay side with the
+  relay's chain-spec instead of its name, which no node knows.
+
 ### Changed
 
+- A custom relay's epoch length is read from its runtime
+  (`Babe::EpochDuration`) instead of assumed to be 600 slots.
 - Bump `spin` from 0.9.8, which is yanked on crates.io, to 0.9.9 in
-  `Cargo.lock`. It is pulled in through `wasmi`.
+  `Cargo.lock`. It is pulled in through `wasmi`.  
 
 ## [0.6.5] - 2026-11-06
 
@@ -460,3 +480,4 @@ First tagged release.
 [#151]: https://github.com/pepoviola/zombie-bite/pull/151
 [#159]: https://github.com/pepoviola/zombie-bite/pull/159
 [#161]: https://github.com/pepoviola/zombie-bite/pull/161
+[#163]: https://github.com/paritytech/zombie-bite/issues/163

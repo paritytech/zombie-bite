@@ -8,12 +8,13 @@ use std::{
     str::FromStr,
     time::{SystemTime, UNIX_EPOCH},
 };
-use tracing::{trace, warn};
+use tracing::{info, trace, warn};
 
 use crate::config::{
-    BiteOptions, CoresOverride, DoppelgangerSetup, Parachain, Relaychain, SpawnSetup, Upgrades,
-    ZombieBiteConfig,
+    get_assigned_cores, BiteOptions, CoresOverride, DoppelgangerSetup, Parachain, Relaychain,
+    SpawnSetup, StackConfig, Upgrades, ZombieBiteConfig,
 };
+use crate::stack::{self, StackSource};
 
 const KNOWN_RELAYS: [&str; 4] = ["polkadot", "kusama", "paseo", "westend"];
 
@@ -80,6 +81,13 @@ pub struct BiteOverrides {
     pub doppelganger: Option<String>,
     /// `doppelganger-parachain` binary to sync the parachains with.
     pub doppelganger_parachain: Option<String>,
+    /// Trinity stack to bite (descriptor url, file or `polkadotapp://stack`
+    /// link), instead of `relay` / `parachains`.
+    pub stack: Option<String>,
+    /// Operator key to check the stack descriptor's signature with.
+    pub stack_key: Option<String>,
+    /// Roles of the stack's chains to bite; all of them when unset.
+    pub stack_chains: Option<Vec<String>>,
 }
 
 /// Values that take precedence over the config file when resolving a spawn.
@@ -140,8 +148,141 @@ pub struct ResolvedSpawnConfig {
     pub publish_bootnodes: Option<String>,
 }
 
+/// Resolve a bite from an optional config file plus overrides. A Trinity stack
+/// needs network access to be read, use [`resolve_bite_config_with_stack`] for
+/// it.
 pub fn resolve_bite_config(
     config_path: Option<String>,
+    overrides: BiteOverrides,
+) -> Result<ResolvedBiteConfig, anyhow::Error> {
+    let config_file = load_config(config_path)?;
+    if overrides.stack.is_some() || config_file.as_ref().is_some_and(|c| c.stack.is_some()) {
+        bail!("biting a stack needs `resolve_bite_config_with_stack`");
+    }
+    resolve_bite_config_from(config_file, overrides)
+}
+
+fn load_config(config_path: Option<String>) -> Result<Option<ZombieBiteConfig>, anyhow::Error> {
+    config_path
+        .map(|path| {
+            ZombieBiteConfig::from_file(&path)
+                .map_err(|e| anyhow!("can't read config file '{path}': {e}"))
+        })
+        .transpose()
+}
+
+/// The `[stack]` to bite, if any: the cli's `--stack` wins over the config
+/// file's, and `--stack-key` / `--stack-chains` over its `key` / `chains`.
+fn stack_to_bite(
+    config_file: Option<&ZombieBiteConfig>,
+    overrides: &BiteOverrides,
+) -> Option<StackConfig> {
+    let mut stack = match (&overrides.stack, config_file.and_then(|c| c.stack.clone())) {
+        (Some(pointer), _) => StackConfig {
+            pointer: pointer.clone(),
+            ..Default::default()
+        },
+        (None, Some(stack)) => stack,
+        (None, None) => return None,
+    };
+    if overrides.stack_key.is_some() {
+        stack.key.clone_from(&overrides.stack_key);
+    }
+    if overrides.stack_chains.is_some() {
+        stack.chains.clone_from(&overrides.stack_chains);
+    }
+    Some(stack)
+}
+
+/// Derive the bite config of a Trinity stack: read and check its descriptor,
+/// download the chain-specs under the base path, read the core counts from the
+/// relay, and merge the config file's `[relaychain]` / `[[parachains]]` on top.
+/// Returns `None` when no stack is set.
+pub async fn derive_stack_config(
+    config_path: Option<String>,
+    overrides: &BiteOverrides,
+) -> Result<Option<(ZombieBiteConfig, StackSource)>, anyhow::Error> {
+    let config_file = load_config(config_path)?;
+    let Some(stack) = stack_to_bite(config_file.as_ref(), overrides) else {
+        return Ok(None);
+    };
+    if overrides.relay.is_some()
+        || overrides.parachains.is_some()
+        || overrides.rc_sync_url.is_some()
+    {
+        bail!("a stack brings its own relay and parachains: --stack can't be combined with --rc, --parachains or --rc-sync-url");
+    }
+
+    let base_path = get_base_path(
+        overrides
+            .base_path
+            .clone()
+            .or_else(|| config_file.as_ref().and_then(|c| c.base_path.clone())),
+    );
+    let bite_at = overrides
+        .relay_bite_at
+        .or_else(|| config_file.as_ref().and_then(|c| c.relaychain.bite_at));
+
+    let bite = stack::materialize(&stack, &base_path, bite_at).await?;
+    let mut merged = stack::merge_user_config(bite.config, config_file.as_ref())?;
+    // the chain-specs were downloaded there
+    merged.base_path = Some(base_path.to_string_lossy().to_string());
+    Ok(Some((merged, bite.source)))
+}
+
+/// Resolve a bite like [`resolve_bite_config`], reading the Trinity stack set
+/// with `--stack` (or the config file's `[stack]`) when there is one. The
+/// derived config is written to `<base_path>/stack-config.toml`.
+pub async fn resolve_bite_config_with_stack(
+    config_path: Option<String>,
+    overrides: BiteOverrides,
+) -> Result<ResolvedBiteConfig, anyhow::Error> {
+    let Some((config, source)) = derive_stack_config(config_path.clone(), &overrides).await? else {
+        return resolve_bite_config(config_path, overrides);
+    };
+
+    let base_path = PathBuf::from(
+        config
+            .base_path
+            .clone()
+            .expect("set by derive_stack_config"),
+    );
+    stack::write_config(&config, &base_path.join(stack::STACK_CONFIG_FILE)).await?;
+    info!(
+        "📝 config derived from stack '{}' written to {}",
+        source.id,
+        base_path.join(stack::STACK_CONFIG_FILE).display()
+    );
+
+    let mut resolved = resolve_bite_config_from(
+        Some(config),
+        BiteOverrides {
+            stack: None,
+            stack_key: None,
+            stack_chains: None,
+            ..overrides
+        },
+    )?;
+
+    let total: u32 = resolved
+        .parachains
+        .iter()
+        .map(|p| get_assigned_cores(&resolved.relaychain, p, &resolved.opts.cores))
+        .sum();
+    if total > MAX_BACKED_CORES {
+        warn!("the bite assigns {total} cores but the fork runs at most {} validators, so some cores may get no backing group; lower them with --para-cores or bite fewer chains with --stack-chains", MAX_BACKED_CORES + 1);
+    }
+
+    resolved.opts.stack = Some(source);
+    Ok(resolved)
+}
+
+/// Cores the fork's validator set (capped at 7: one per core plus a spare)
+/// can back.
+const MAX_BACKED_CORES: u32 = 6;
+
+fn resolve_bite_config_from(
+    config_file: Option<ZombieBiteConfig>,
     overrides: BiteOverrides,
 ) -> Result<ResolvedBiteConfig, anyhow::Error> {
     let BiteOverrides {
@@ -160,14 +301,10 @@ pub fn resolve_bite_config(
         publish_bootnodes,
         doppelganger,
         doppelganger_parachain,
+        stack: _,
+        stack_key: _,
+        stack_chains: _,
     } = overrides;
-
-    // Load config file if provided
-    let config_file = if let Some(path) = config_path {
-        Some(ZombieBiteConfig::from_file(&path)?)
-    } else {
-        None
-    };
 
     // Resolve relaychain (CLI always overrides config file)
     // Determine relay network: CLI > config > default
@@ -179,7 +316,31 @@ pub fn resolve_bite_config(
         "polkadot".to_string()
     };
 
-    let relaychain = if relay_network.starts_with("custom%") {
+    let custom_from_config = config_file
+        .as_ref()
+        .filter(|c| relay.is_none() && c.relaychain.chain_spec.is_some());
+    let relaychain = if let Some(config) = custom_from_config {
+        // A custom relay written in the config file (e.g. derived from a stack).
+        let rc = &config.relaychain;
+        let sync_url = rc_sync_url
+            .clone()
+            .or_else(|| rc.sync_url.clone())
+            .ok_or_else(|| {
+                anyhow!(
+                    "[relaychain] '{}' has a chain_spec but no sync_url",
+                    rc.network
+                )
+            })?;
+        Relaychain::new_custom(
+            &rc.network,
+            rc.chain_spec.clone().expect("filtered above"),
+            sync_url,
+            relay_runtime
+                .clone()
+                .or_else(|| rc.runtime_override.clone()),
+            relay_bite_at.or(rc.bite_at),
+        )
+    } else if relay_network.starts_with("custom%") {
         resolve_custom_relaychain(&relay_network, relay_runtime.clone(), relay_bite_at)?
     } else if !KNOWN_RELAYS.contains(&relay_network.as_str()) {
         // Anything else is a typo, not a chain to bite: a custom relay has to
@@ -384,6 +545,7 @@ pub fn resolve_bite_config(
             cores,
             keep_messaging_state: resolved_keep_messaging,
             doppelganger: doppelganger_setup,
+            stack: None,
         },
     };
     resolved.validate()?;
@@ -497,6 +659,7 @@ fn resolve_custom_parachain(s: &str) -> Result<Parachain, anyhow::Error> {
         maybe_bite_at: None,
         maybe_rpc_endpoint: Some(rpc_endpoint),
         cores: req_cores,
+        role: None,
     })
 }
 
@@ -694,5 +857,55 @@ mod test {
         .to_string();
 
         assert!(err.contains("for parachain"), "{err}");
+    }
+
+    /// A config derived from a stack resolves to a custom relay started from
+    /// the stack's chain-spec, and custom paras started from theirs.
+    #[test]
+    fn stack_derived_config_uses_the_stack_specs() {
+        let config: ZombieBiteConfig = toml::from_str(
+            r#"
+            [relaychain]
+            network = "previewnet"
+            sync_url = "wss://previewnet.substrate.dev/relay/alice"
+            chain_spec = "/b/stack/previewnet-relay.json"
+
+            [[parachains]]
+            type = "custom"
+            id = 1500
+            role = "AssetHub"
+            rpc_endpoint = "wss://previewnet.substrate.dev/asset-hub"
+            chain_spec = "/b/stack/previewnet-assethub.json"
+            cores = 3
+            "#,
+        )
+        .unwrap();
+        let resolved = resolve_bite_config_from(
+            Some(config),
+            BiteOverrides {
+                base_path: Some("/tmp/zb-stack-test".into()),
+                ..Default::default()
+            },
+        )
+        .unwrap();
+
+        let relay = &resolved.relaychain;
+        assert!(relay.is_custom());
+        assert_eq!(relay.as_chain_string(), "previewnet");
+        // relay sync node and the relay side of the para sync nodes
+        assert_eq!(relay.chain_arg(), "/b/stack/previewnet-relay.json");
+        assert_eq!(
+            relay.sync_endpoint(),
+            "wss://previewnet.substrate.dev/relay/alice"
+        );
+
+        let ah = &resolved.parachains[0];
+        assert_eq!(ah.id(), 1500);
+        assert!(ah.is_asset_hub());
+        assert_eq!(
+            ah.chain_spec_path(),
+            Some("/b/stack/previewnet-assethub.json")
+        );
+        assert_eq!(resolved.opts.cores.get(&1500), Some(&3));
     }
 }

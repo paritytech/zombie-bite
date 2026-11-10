@@ -11,13 +11,46 @@ use crate::config::{get_state_pruning_config, Parachain, Relaychain};
 use crate::utils::get_random_port;
 
 use reqwest::Url;
-use tracing::{debug, error, info, trace};
+use tracing::{debug, error, info, trace, warn};
 use zombienet_orchestrator::metrics::{Metrics, MetricsHelper};
 use zombienet_provider::{types::SpawnNodeOptions, DynNamespace, DynNode};
 use zombienet_support::net::wait_ws_ready;
 
 const PASEO_ASSET_HUB_SPEC_URL: &str =
     "https://paseo-r2.zondax.ch/chain-specs/paseo-asset-hub.json";
+
+#[allow(clippy::too_many_arguments)]
+/// Epoch length (in slots) the sync node is told about. The public networks'
+/// are known; a custom relay's is read from its runtime (`Babe::EpochDuration`),
+/// falling back to a testnet-sized epoch when it can't be.
+async fn rc_epoch_duration(relaychain: &Relaychain) -> u64 {
+    if !relaychain.is_custom() {
+        return relaychain.epoch_duration();
+    }
+    let meta = crate::metadata::ChainMetadata::fetch(
+        &relaychain.as_chain_string(),
+        &relaychain.rpc_endpoint(),
+        relaychain.at_block(),
+    )
+    .await;
+    match meta.and_then(|m| m.constant_u64("Babe", "EpochDuration")) {
+        Some(epoch) => {
+            info!(
+                "{}: epoch duration {epoch} (from Babe::EpochDuration)",
+                relaychain.as_chain_string()
+            );
+            epoch
+        }
+        None => {
+            let fallback = relaychain.epoch_duration();
+            warn!(
+                "{}: can't read Babe::EpochDuration, assuming {fallback}",
+                relaychain.as_chain_string()
+            );
+            fallback
+        }
+    }
+}
 
 #[allow(clippy::too_many_arguments)]
 pub async fn sync_relay_only(
@@ -66,7 +99,7 @@ pub async fn sync_relay_only(
 
     env.push((
         "ZOMBIE_RC_EPOCH_DURATION".into(),
-        relaychain.epoch_duration().to_string(),
+        rc_epoch_duration(relaychain).await.to_string(),
     ));
 
     // if we are sync westend, let doppelganger know to bypass
@@ -184,6 +217,11 @@ pub async fn sync_para(
         chain.as_ref()
     };
 
+    // The relay side of the para node is started with the relay's chain-spec
+    // when it is a custom one (e.g. from a Trinity stack): a node only knows
+    // the public networks by name.
+    let relay_chain_arg = relaychain.chain_arg();
+
     let unique_node_name = format!("sync-node-para-{}", chain.replace("-", "_"));
     info!(
         "🔄 Starting sync for parachain: {} with unique node name: {}",
@@ -212,7 +250,7 @@ pub async fn sync_para(
             database,
             "--",
             "--chain",
-            relaychain.as_chain_string().as_ref(),
+            relay_chain_arg.as_str(),
         ])
         .env(env);
 
