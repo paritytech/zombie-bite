@@ -30,6 +30,14 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ### Changed
 
+- Every bitten para's core count is read from the relay's claim queue (at
+  `--rc-bite-at` when set), not only a stack's: system paras also get the
+  count from relay-chain and hard-coded counts are just keep as fallback,
+   and a `custom%` para or `type = "custom"` entry without
+  `req_cores` / `cores` gets its live count instead of 1. `--para-cores` and
+  config counts still win; the old counts are the fallback when the relay
+  can't be read. A bite needing more cores than the fork can back (6) is now
+  refused before syncing instead of warned about ([#165]).
 - A custom relay's epoch length is read from its runtime
   (`Babe::EpochDuration`) instead of assumed to be 600 slots.
 - Bump `spin` from 0.9.8, which is yanked on crates.io, to 0.9.9 in
@@ -481,3 +489,4 @@ First tagged release.
 [#159]: https://github.com/pepoviola/zombie-bite/pull/159
 [#161]: https://github.com/pepoviola/zombie-bite/pull/161
 [#163]: https://github.com/paritytech/zombie-bite/issues/163
+[#165]: https://github.com/paritytech/zombie-bite/issues/165
