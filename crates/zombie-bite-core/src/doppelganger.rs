@@ -850,7 +850,9 @@ async fn generate_config(
     };
 
     // Must match the validator set installed by the state overrides.
-    let num_validators = crate::config::num_validators_for_cores(req_cores) as usize;
+    let validator_names = crate::utils::relay_validator_names(
+        crate::config::num_validators_for_cores(req_cores) as usize,
+    );
 
     // Everything a parachain needs that has to be awaited, done before the
     // builder below exists: zombienet's builders hold an `Rc<RefCell<…>>`, so
@@ -930,30 +932,28 @@ async fn generate_config(
             .with_default_db_snapshot(db_path)
             .with_default_args(default_args);
 
-        {
-            let mut relay_builder = relay_builder
-                .with_validator(|node| {
-                    node.with_name("alice")
-                        .with_rpc_port(rpc_alice_port)
-                        .with_env(vec![VALIDATOR_ENV])
+        // alice and bob (always the first two) keep their fixed or
+        // env-provided rpc ports.
+        let (first, rest) = validator_names
+            .split_first()
+            .expect("at least two validators");
+        let relay_builder = relay_builder.with_validator(|node| {
+            node.with_name(first)
+                .with_rpc_port(rpc_alice_port)
+                .with_env(vec![VALIDATOR_ENV])
+        });
+        rest.iter()
+            .enumerate()
+            .fold(relay_builder, |builder, (i, name)| {
+                builder.with_validator(|node| {
+                    let node = node.with_name(name).with_env(vec![VALIDATOR_ENV]);
+                    if i == 0 {
+                        node.with_rpc_port(rpc_bob_port)
+                    } else {
+                        node
+                    }
                 })
-                .with_validator(|node| {
-                    node.with_name("bob")
-                        .with_rpc_port(rpc_bob_port)
-                        .with_env(vec![VALIDATOR_ENV])
-                });
-
-            let additional_validators = ["charlie", "dave", "ferdie", "eve", "one"];
-            // Spawn validators based on total count, accounting for alice and bob already added
-            for name in additional_validators
-                .iter()
-                .take(num_validators.saturating_sub(2))
-            {
-                relay_builder = relay_builder
-                    .with_validator(|node| node.with_name(*name).with_env(vec![VALIDATOR_ENV]));
-            }
-            relay_builder
-        }
+            })
     });
 
     for (para, chain_spec_path, db_path, para_rpc_port) in prepared_paras {
@@ -1334,5 +1334,98 @@ mod test {
 
         let toml = network_config.dump_to_toml().unwrap();
         assert!(toml.contains("--db-cache=24000"));
+    }
+
+    /// A bite past the seven dev accounts spawns one validator per core plus
+    /// a spare, and the validators written to the relay's state are exactly
+    /// the spawned nodes, with the keys their keystores are filled from.
+    #[tokio::test]
+    async fn state_validators_are_the_spawned_nodes() {
+        use codec::Decode;
+
+        use crate::{
+            config::{CoresOverride, Relaychain},
+            metadata::storage_key,
+            overrides::generate_default_overrides_for_rc,
+            utils::ValidatorKeys,
+        };
+
+        let req_cores = 9;
+        let dir = std::env::temp_dir().join(format!("zb-validators-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let spec = dir.join("relay.json");
+        let snap = dir.join("relay.tgz");
+        std::fs::write(&spec, "{}").unwrap();
+        std::fs::write(&snap, b"dummy").unwrap();
+
+        let relay = ChainArtifact {
+            cmd: "doppelganger".into(),
+            image: None,
+            chain: "polkadot".into(),
+            spec_path: spec.to_string_lossy().into(),
+            snap_path: snap.to_string_lossy().into(),
+            snap_bytes: None,
+            override_wasm: None,
+            para_id: None,
+            cores: 0,
+        };
+        let network_config = generate_config(relay, vec![], None, "rocksdb", req_cores)
+            .await
+            .unwrap();
+        let nodes: Vec<String> = network_config
+            .relaychain()
+            .nodes()
+            .iter()
+            .map(|n| n.name().to_string())
+            .collect();
+        assert_eq!(nodes.len(), req_cores as usize + 1);
+        assert_eq!(&nodes[..2], ["alice", "bob"]);
+        assert_eq!(nodes[9], "validator-10");
+
+        let overrides_path = generate_default_overrides_for_rc(
+            dir.to_str().unwrap(),
+            &Relaychain::new("polkadot"),
+            &vec![],
+            req_cores,
+            None,
+            None,
+            &CoresOverride::new(),
+            false,
+        )
+        .await
+        .unwrap();
+        let written: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(overrides_path).unwrap()).unwrap();
+        let value = |pallet: &str, item: &str| {
+            hex::decode(
+                written["overrides"][storage_key(pallet, item)]
+                    .as_str()
+                    .unwrap(),
+            )
+            .unwrap()
+        };
+
+        let expected: Vec<ValidatorKeys> = nodes.iter().map(|n| ValidatorKeys::derive(n)).collect();
+        let stashes = Vec::<[u8; 32]>::decode(&mut &value("Session", "Validators")[..]).unwrap();
+        let babe = Vec::<([u8; 32], u64)>::decode(&mut &value("Babe", "Authorities")[..]).unwrap();
+        let indices =
+            Vec::<u32>::decode(&mut &value("ParasShared", "ActiveValidatorIndices")[..]).unwrap();
+        let groups =
+            Vec::<Vec<u32>>::decode(&mut &value("ParaScheduler", "ValidatorGroups")[..]).unwrap();
+
+        assert_eq!(
+            stashes.iter().map(hex::encode).collect::<Vec<_>>(),
+            expected.iter().map(|k| k.stash.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(
+            babe.iter().map(|(k, _)| hex::encode(k)).collect::<Vec<_>>(),
+            expected.iter().map(|k| k.babe.clone()).collect::<Vec<_>>()
+        );
+        assert_eq!(indices, (0..nodes.len() as u32).collect::<Vec<_>>());
+        // every core gets a backing group
+        assert_eq!(groups.len(), req_cores as usize);
+        assert!(groups.iter().all(|g| !g.is_empty()));
+
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 }

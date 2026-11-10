@@ -16,18 +16,49 @@ use tokio::net::TcpListener;
 use codec::{CompactAs, Decode, Encode, MaxEncodedLen};
 use tracing::trace;
 
+/// Session keys (and stash) of one relay validator, as hex.
+#[derive(Clone, Debug, PartialEq, Eq)]
 pub struct ValidatorKeys {
-    pub name: &'static str,
-    pub stash: &'static str,
-    pub babe: &'static str,
-    pub grandpa: &'static str,
-    pub para_validator: &'static str,
-    pub para_assignment: &'static str,
-    pub authority_discovery: &'static str,
-    pub beefy: &'static str,
+    pub name: String,
+    pub stash: String,
+    pub babe: String,
+    pub grandpa: String,
+    pub para_validator: String,
+    pub para_assignment: String,
+    pub authority_discovery: String,
+    pub beefy: String,
 }
 
 impl ValidatorKeys {
+    /// Keys of the relay validator node `name`: the ones zombienet fills its
+    /// keystore with, from zombienet's own generator and seed (see
+    /// [`node_seed`]). sr25519 for babe, para_validator, para_assignment and
+    /// authority_discovery, ed25519 for grandpa, ecdsa (compressed) for
+    /// beefy; the stash is the `<seed>//stash` sr25519 account.
+    pub fn derive(name: &str) -> Self {
+        let accounts = zombienet_sdk::generators::generate_node_keys(&node_seed(name))
+            .unwrap_or_else(|e| panic!("keys of validator {name}: {e}"));
+        let key = |scheme: &str| {
+            accounts
+                .get(scheme)
+                .unwrap_or_else(|| panic!("zombienet generates no {scheme} key"))
+                .public_key
+                .clone()
+        };
+        let sr = key("sr");
+
+        Self {
+            name: name.to_string(),
+            stash: key("sr_stash"),
+            babe: sr.clone(),
+            grandpa: key("ed"),
+            para_validator: sr.clone(),
+            para_assignment: sr.clone(),
+            authority_discovery: sr,
+            beefy: key("ec"),
+        }
+    }
+
     pub fn session_keys_encoded(&self) -> String {
         format!(
             "{}{}{}{}{}{}",
@@ -45,96 +76,46 @@ impl ValidatorKeys {
     }
 }
 
-pub const ALICE_KEYS: ValidatorKeys = ValidatorKeys {
-    name: "alice",
-    stash: "be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25f",
-    babe: "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
-    grandpa: "88dc3417d5058ec4b4503e0c12ea1a0a89be200fe98922423d4334014fa6b0ee",
-    para_validator: "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
-    para_assignment: "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
-    authority_discovery: "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
-    beefy: "020a1091341fe5664bfa1782d5e04779689068c916b04cb365ec3153755684d9a1",
-};
+/// Seed zombienet derives a node's keystore from: its name with the first
+/// letter capitalized, as a `//` hard derivation (`alice` -> `//Alice`).
+///
+/// This must match zombienet (zombienet-orchestrator,
+/// `network_spec/node.rs`), or the keys we write to state are not the keys
+/// the validator holds.
+pub fn node_seed(name: &str) -> String {
+    let mut chars = name.chars();
+    match chars.next() {
+        Some(first) => format!("//{}{}", first.to_uppercase(), chars.as_str()),
+        None => "//".to_string(),
+    }
+}
 
-pub const BOB_KEYS: ValidatorKeys = ValidatorKeys {
-    name: "bob",
-    stash: "fe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e",
-    babe: "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48",
-    grandpa: "d17c2d7823ebf260fd138f2d7e27d114c0145d968b5ff5006125f2414fadae69",
-    para_validator: "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48",
-    para_assignment: "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48",
-    authority_discovery: "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48",
-    beefy: "0390084fdbf27d2b79d26a4f13f0ccd982cb755a661969143c37cbc49ef5b91f27",
-};
+/// The well-known dev accounts, used as the names of the first relay
+/// validators so a fork keeps the familiar `alice` and `bob` (and their
+/// ports and env overrides).
+const DEV_VALIDATOR_NAMES: [&str; 7] = ["alice", "bob", "charlie", "dave", "ferdie", "eve", "one"];
 
-pub const CHARLIE_KEYS: ValidatorKeys = ValidatorKeys {
-    name: "charlie",
-    stash: "1e07379407fecc4b89eb7dbd287c2c781cfb1907a96947a3eb18e4f8e7198625",
-    babe: "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22",
-    grandpa: "439660b36c6c03afafca027b910b4fecf99801834c62a5e6006f27d978de234f",
-    para_validator: "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22",
-    para_assignment: "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22",
-    authority_discovery: "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22",
-    beefy: "020e7446f3910e15fed2b2db1e71a01c57f3dd85cc2e65f30680220e09f8bbbc79",
-};
+/// Name of the relay validator at `index` (0-based): a dev account name for
+/// the first seven, `validator-<index + 1>` after that.
+pub fn relay_validator_name(index: usize) -> String {
+    DEV_VALIDATOR_NAMES
+        .get(index)
+        .map(|name| name.to_string())
+        .unwrap_or_else(|| format!("validator-{}", index + 1))
+}
 
-pub const DAVE_KEYS: ValidatorKeys = ValidatorKeys {
-    name: "dave",
-    stash: "e860f1b1c7227f7c22602f53f15af80747814dffd839719731ee3bba6edc126c",
-    babe: "306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20",
-    grandpa: "5e639b43e0052c47447dac87d6fd2b6ec50bdd4d0f614e4299c665249bbd09d9",
-    para_validator: "306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20",
-    para_assignment: "306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20",
-    authority_discovery: "306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20",
-    beefy: "0227e2b139697b04eb01f4eef7e8f3724431b795c45ce6ef7b8e23a4e93f4abd26",
-};
+/// Names of the first `count` relay validators, in spawn order.
+pub fn relay_validator_names(count: usize) -> Vec<String> {
+    (0..count).map(relay_validator_name).collect()
+}
 
-pub const EVE_KEYS: ValidatorKeys = ValidatorKeys {
-    name: "eve",
-    stash: "8ac59e11963af19174d0b94d5d78041c233f55d2e19324665bafdfb62925af2d",
-    babe: "e659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
-    grandpa: "1dfe3e22cc0d45c70779c1095f7489a8ef3cf52d62fbd8c2fa38c9f1723502b5",
-    para_validator: "e659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
-    para_assignment: "e659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
-    authority_discovery: "e659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
-    beefy: "031d10105e323c4afce225208f71a6441ee327a65b9e646e772500c74d31f669aa",
-};
-
-pub const FERDIE_KEYS: ValidatorKeys = ValidatorKeys {
-    name: "ferdie",
-    stash: "101191192fc877c24d725b337120fa3edc63d227bbc92705db1e2cb65f56981a",
-    babe: "1cbd2d43530a44705ad088af313e18f80b53ef16b36177cd4b77b846f2a5f07c",
-    grandpa: "568cb4a574c6d178feb39c27dfc8b3f789e5f5423e19c71633c748b9acf086b5",
-    para_validator: "1cbd2d43530a44705ad088af313e18f80b53ef16b36177cd4b77b846f2a5f07c",
-    para_assignment: "1cbd2d43530a44705ad088af313e18f80b53ef16b36177cd4b77b846f2a5f07c",
-    authority_discovery: "1cbd2d43530a44705ad088af313e18f80b53ef16b36177cd4b77b846f2a5f07c",
-    beefy: "0291f1217d5a04cb83312ee3d88a6e6b33284e053e6ccfc3a90339a0299d12967c",
-};
-
-pub const ONE_KEYS: ValidatorKeys = ValidatorKeys {
-    name: "one",
-    stash: "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a",
-    babe: "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a",
-    grandpa: "16f97016bbea8f7b45ae6757b49efc1080accc175d8f018f9ba719b60b0815e4",
-    para_validator: "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a",
-    para_assignment: "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a",
-    authority_discovery: "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a",
-    beefy: "036c6ae73d36d0c02b54d7877a57b1734b8e096134bd2c1b829431aa38f18bcce1",
-};
-
-/// Get the validator keys for the specified number of validators
-pub fn get_validator_keys(count: usize) -> Vec<&'static ValidatorKeys> {
-    let all_keys = [
-        &ALICE_KEYS,
-        &BOB_KEYS,
-        &CHARLIE_KEYS,
-        &DAVE_KEYS,
-        &FERDIE_KEYS,
-        &EVE_KEYS,
-        &ONE_KEYS,
-    ];
-
-    all_keys.into_iter().take(count).collect()
+/// Keys of the first `count` relay validators, in the same order as
+/// [`relay_validator_names`].
+pub fn relay_validators(count: usize) -> Vec<ValidatorKeys> {
+    relay_validator_names(count)
+        .iter()
+        .map(|name| ValidatorKeys::derive(name))
+        .collect()
 }
 
 /// Generate collator keys from a seed string using specified algorithm
@@ -577,6 +558,109 @@ pub async fn get_header_from_block(
 #[cfg(test)]
 mod test {
     use super::*;
+
+    /// The well-known dev keys of `//Alice` … `//One`. zombie-bite used to
+    /// hard-code them; the hard-coded beefy keys of charlie and dave and the
+    /// stash of one (its sr key) were not the ones these seeds give, so they
+    /// are corrected here.
+    const DEV_VALIDATOR_VECTORS: [[&str; 5]; 7] = [
+        // name, stash, sr (babe, para, asgn, audi), ed (gran), ec (beef)
+        [
+            "alice",
+            "be5ddb1579b72e84524fc29e78609e3caf42e85aa118ebfe0b0ad404b5bdd25f",
+            "d43593c715fdd31c61141abd04a99fd6822c8558854ccde39a5684e7a56da27d",
+            "88dc3417d5058ec4b4503e0c12ea1a0a89be200fe98922423d4334014fa6b0ee",
+            "020a1091341fe5664bfa1782d5e04779689068c916b04cb365ec3153755684d9a1",
+        ],
+        [
+            "bob",
+            "fe65717dad0447d715f660a0a58411de509b42e6efb8375f562f58a554d5860e",
+            "8eaf04151687736326c9fea17e25fc5287613693c912909cb226aa4794f26a48",
+            "d17c2d7823ebf260fd138f2d7e27d114c0145d968b5ff5006125f2414fadae69",
+            "0390084fdbf27d2b79d26a4f13f0ccd982cb755a661969143c37cbc49ef5b91f27",
+        ],
+        [
+            "charlie",
+            "1e07379407fecc4b89eb7dbd287c2c781cfb1907a96947a3eb18e4f8e7198625",
+            "90b5ab205c6974c9ea841be688864633dc9ca8a357843eeacf2314649965fe22",
+            "439660b36c6c03afafca027b910b4fecf99801834c62a5e6006f27d978de234f",
+            "0389411795514af1627765eceffcbd002719f031604fadd7d188e2dc585b4e1afb",
+        ],
+        [
+            "dave",
+            "e860f1b1c7227f7c22602f53f15af80747814dffd839719731ee3bba6edc126c",
+            "306721211d5404bd9da88e0204360a1a9ab8b87c66c1bc2fcdd37f3c2222cc20",
+            "5e639b43e0052c47447dac87d6fd2b6ec50bdd4d0f614e4299c665249bbd09d9",
+            "03bc9d0ca094bd5b8b3225d7651eac5d18c1c04bf8ae8f8b263eebca4e1410ed0c",
+        ],
+        [
+            "eve",
+            "8ac59e11963af19174d0b94d5d78041c233f55d2e19324665bafdfb62925af2d",
+            "e659a7a1628cdd93febc04a4e0646ea20e9f5f0ce097d9a05290d4a9e054df4e",
+            "1dfe3e22cc0d45c70779c1095f7489a8ef3cf52d62fbd8c2fa38c9f1723502b5",
+            "031d10105e323c4afce225208f71a6441ee327a65b9e646e772500c74d31f669aa",
+        ],
+        [
+            "ferdie",
+            "101191192fc877c24d725b337120fa3edc63d227bbc92705db1e2cb65f56981a",
+            "1cbd2d43530a44705ad088af313e18f80b53ef16b36177cd4b77b846f2a5f07c",
+            "568cb4a574c6d178feb39c27dfc8b3f789e5f5423e19c71633c748b9acf086b5",
+            "0291f1217d5a04cb83312ee3d88a6e6b33284e053e6ccfc3a90339a0299d12967c",
+        ],
+        [
+            "one",
+            "7eb5180f1c619ea25be3c42de81c4c368347c62024f0eaa2b3334f79d7c46f18",
+            "ac859f8a216eeb1b320b4c76d118da3d7407fa523484d0a980126d3b4d0d220a",
+            "16f97016bbea8f7b45ae6757b49efc1080accc175d8f018f9ba719b60b0815e4",
+            "036c6ae73d36d0c02b54d7877a57b1734b8e096134bd2c1b829431aa38f18bcce1",
+        ],
+    ];
+
+    #[test]
+    fn derived_keys_match_the_dev_validators() {
+        for [name, stash, sr, ed, ec] in DEV_VALIDATOR_VECTORS {
+            let keys = ValidatorKeys::derive(name);
+            assert_eq!(keys.babe, sr, "{name} babe");
+            assert_eq!(keys.para_validator, sr, "{name} para_validator");
+            assert_eq!(keys.para_assignment, sr, "{name} para_assignment");
+            assert_eq!(keys.authority_discovery, sr, "{name} authority_discovery");
+            assert_eq!(keys.grandpa, ed, "{name} grandpa");
+            assert_eq!(keys.beefy, ec, "{name} beefy");
+            assert_eq!(keys.stash, stash, "{name} stash");
+        }
+    }
+
+    #[test]
+    fn node_seed_capitalizes_like_zombienet() {
+        assert_eq!(node_seed("alice"), "//Alice");
+        assert_eq!(node_seed("validator-8"), "//Validator-8");
+    }
+
+    #[test]
+    fn validators_past_the_dev_accounts_get_generated_names() {
+        let names = relay_validator_names(9);
+        assert_eq!(
+            names,
+            [
+                "alice",
+                "bob",
+                "charlie",
+                "dave",
+                "ferdie",
+                "eve",
+                "one",
+                "validator-8",
+                "validator-9"
+            ]
+        );
+        let keys = relay_validators(9);
+        assert_eq!(
+            keys.iter().map(|k| k.name.as_str()).collect::<Vec<_>>(),
+            names
+        );
+        let distinct: std::collections::BTreeSet<_> = keys.iter().map(|k| &k.babe).collect();
+        assert_eq!(distinct.len(), 9);
+    }
 
     #[test]
     fn para_id() {

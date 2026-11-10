@@ -25,6 +25,12 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ### Fixed
 
+- The beefy keys written to state for `charlie` and `dave` were not the ones
+  in their keystores, so they could not sign BEEFY votes; the validator id of
+  `one` is now its `//One//stash` account like every other validator ([#166]).
+- The SCALE length prefix of the relay's validator vecs and the
+  `ActiveValidatorIndices` entries were hand-encoded and only correct up to
+  63 validators (and 256 indices); they are now encoded with `codec`.
 - The parachain sync nodes of a custom relay start their relay side with the
   relay's chain-spec instead of its name, which no node knows.
 
@@ -35,8 +41,13 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
   hard-coded counts, and a `custom%` para or `type = "custom"` entry without
   `req_cores` / `cores` gets its live count instead of 1. `--para-cores` and
   config counts still win; the old counts are the fallback when the relay
-  can't be read. A bite needing more cores than the fork can back (6) is now
-  refused before syncing instead of warned about ([#165]).
+  can't be read ([#165]).
+- The 7-validator cap is gone: the relay runs one validator per core plus a
+  spare, however many cores the bite needs, so e.g. a Polkadot bite of every
+  system chain at its default cores (9) now spawns. Validators past the seven
+  dev accounts are named `validator-8`, `validator-9`, … and their keys are
+  derived with zombienet's own generator from the seed their keystore is
+  filled from. The bite warns above 16 validators ([#166]).
 - A custom relay's epoch length is read from its runtime
   (`Babe::EpochDuration`) instead of assumed to be 600 slots.
 - Bump `spin` from 0.9.8, which is yanked on crates.io, to 0.9.9 in
@@ -489,3 +500,4 @@ First tagged release.
 [#161]: https://github.com/pepoviola/zombie-bite/pull/161
 [#163]: https://github.com/paritytech/zombie-bite/issues/163
 [#165]: https://github.com/paritytech/zombie-bite/issues/165
+[#166]: https://github.com/paritytech/zombie-bite/issues/166
