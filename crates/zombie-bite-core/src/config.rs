@@ -161,14 +161,13 @@ type MaybeChainSpec = Option<String>;
 // bridge (1002): 1
 // collectives (1001): 1
 
-/// Dev validators for a bitten relay: one per requested core plus one spare,
-/// clamped between the two nodes the spawner always starts (alice, bob) and
-/// the seven well-known dev accounts. Used by both the state overrides and the
-/// spawner so the validator set in state always matches the nodes running.
-// TODO: the upper bound is only there because we reuse the well-known dev
-// accounts; generating keys would let a fork scale past 7 validators.
+/// Validators for a bitten relay: one per requested core plus one spare, and
+/// at least the two nodes the spawner always starts (alice, bob). Used by
+/// both the state overrides and the spawner so the validator set in state
+/// always matches the nodes running; their names and keys come from
+/// [`crate::utils::relay_validators`].
 pub(crate) fn num_validators_for_cores(req_cores: u32) -> u32 {
-    (1 + req_cores).clamp(2, 7)
+    (1 + req_cores).max(2)
 }
 
 /// Runtimes under test, carried into the fork as an *authorized* upgrade
@@ -822,15 +821,6 @@ const CMD_TPL: &str = "chain-spec-generator {{chainName}}";
 pub(crate) const DEFAULT_CHAIN_SPEC_TPL_COMMAND: &str =
     "{{mainCommand}} build-spec --chain {{chainName}} {{disableBootnodes}}";
 
-// Relaychain nodes
-const ALICE: &str = "alice";
-const BOB: &str = "bob";
-const CHARLIE: &str = "charlie";
-const DAVE: &str = "dave";
-const EVE: &str = "eve";
-const FERDIE: &str = "ferdie";
-const ONE: &str = "one";
-
 pub(crate) fn generate_network_config(
     network: &Relaychain,
     paras: Vec<Parachain>,
@@ -846,11 +836,8 @@ pub(crate) fn generate_network_config(
         Relaychain::Paseo { .. } | Relaychain::Custom { .. } => DEFAULT_CHAIN_SPEC_TPL_COMMAND,
     };
 
-    // Calculate required validators based on parachain count
-    // Base: 2 validators (Alice, Bob) + 1 per parachain
-    // Max supported: 7 validators for up to 5 parachains
-    let num_parachains = paras.len();
-    let required_validators = 2 + num_parachains;
+    // Base: 2 validators (alice, bob) + 1 per parachain
+    let validator_names = crate::utils::relay_validator_names(2 + paras.len());
 
     let network_builder = NetworkConfigBuilder::new().with_relaychain(|r| {
         let relaychain_builder = r
@@ -869,28 +856,25 @@ pub(crate) fn generate_network_config(
             // .with_default_args(vec![("-l", "babe=debug,grandpa=debug,runtime=debug,parachain::=debug,sub-authority-discovery=trace").into()])
             .with_default_args(vec![("-l", "runtime=trace").into()]);
 
-        // Always add Alice (with optional custom RPC port)
-        let relaychain_builder = if let Ok(port) = env::var("ZOMBIE_BITE_RC_PORT") {
-            let rpc_port = port
-                .parse()
-                .expect("env var ZOMBIE_BITE_RC_PORT must be a valid u16");
-            relaychain_builder.with_validator(|node| node.with_name(ALICE).with_rpc_port(rpc_port))
-        } else {
-            relaychain_builder.with_validator(|node| node.with_name(ALICE))
-        };
+        // The first validator (alice) takes the optional custom RPC port
+        let rc_port = env::var("ZOMBIE_BITE_RC_PORT").ok().map(|port| {
+            port.parse::<u16>()
+                .expect("env var ZOMBIE_BITE_RC_PORT must be a valid u16")
+        });
 
-        // Always add Bob
-        let relaychain_builder = relaychain_builder.with_validator(|node| node.with_name(BOB));
-        // Add additional validators based on parachain count
-        let validator_names = [CHARLIE, DAVE, FERDIE, EVE, ONE];
-        let additional_validators_needed = required_validators.saturating_sub(2);
-
-        validator_names
-            .iter()
-            .take(additional_validators_needed)
-            .fold(relaychain_builder, |builder, &name| {
-                builder.with_validator(|node| node.with_name(name))
-            })
+        let (first, rest) = validator_names
+            .split_first()
+            .expect("at least two validators");
+        let relaychain_builder = relaychain_builder.with_validator(|node| {
+            let node = node.with_name(first);
+            match rc_port {
+                Some(port) => node.with_rpc_port(port),
+                None => node,
+            }
+        });
+        rest.iter().fold(relaychain_builder, |builder, name| {
+            builder.with_validator(|node| node.with_name(name))
+        })
     });
 
     let network_builder = paras.iter().fold(network_builder, |builder, para| {

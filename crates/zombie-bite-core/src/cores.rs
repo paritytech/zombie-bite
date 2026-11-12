@@ -9,8 +9,8 @@
 //! 4. the built-in defaults of [`builtin_cores`], used when the relay can't be
 //!    read (no runtime API, endpoint unreachable).
 //!
-//! The total is capped by the validators the fork can run, see
-//! [`MAX_BACKED_CORES`].
+//! The fork runs one relay validator per core (plus a spare), so the total is
+//! not capped.
 
 use std::{
     collections::{BTreeMap, BTreeSet},
@@ -23,14 +23,10 @@ use tracing::{info, warn};
 use zombienet_sdk::subxt::ext::subxt_rpcs::client::RpcParams;
 
 use crate::{
-    config::{num_validators_for_cores, CoresOverride, Parachain, Relaychain},
+    config::{CoresOverride, Parachain, Relaychain},
     metadata::claim_queue_cores,
     rpc::rpc_client,
 };
-
-/// Cores the fork's validator set (capped at 7: one per core plus a spare)
-/// can back.
-pub(crate) const MAX_BACKED_CORES: u32 = 6;
 
 const RELAY_QUERY_TIMEOUT: Duration = Duration::from_secs(30);
 
@@ -140,26 +136,8 @@ pub(crate) fn assign(
         .collect()
 }
 
-/// Refuse a bite whose cores can't all get a backing group on the fork.
-pub(crate) fn check_cap(assignments: &[CoreAssignment]) -> Result<(), anyhow::Error> {
-    let total: u32 = assignments.iter().map(|a| a.cores).sum();
-    if total > MAX_BACKED_CORES {
-        let detail = assignments
-            .iter()
-            .map(|a| format!("{}={} ({})", a.para_id, a.cores, a.source))
-            .collect::<Vec<_>>()
-            .join(", ");
-        bail!(
-            "the bite needs {total} cores but the fork runs at most {} validators, so it can back at most {MAX_BACKED_CORES}: [{detail}]. Lower them with --para-cores <para_id>=<cores> (or `cores` in the config), or bite fewer parachains",
-            num_validators_for_cores(total)
-        );
-    }
-    Ok(())
-}
-
 /// Resolve every para's core count, reading the relay when some para has no
-/// explicit one. Never fails on the relay read (falls back with a warning),
-/// only on the cap.
+/// explicit one. Never fails on the relay read (falls back with a warning).
 pub(crate) async fn resolve_cores(
     relay: &Relaychain,
     paras: &[Parachain],
@@ -198,7 +176,6 @@ pub(crate) async fn resolve_cores(
             info!("🧩 para {}: {} core(s) ({})", a.para_id, a.cores, a.source);
         }
     }
-    check_cap(&assignments)?;
 
     Ok(assignments
         .into_iter()
@@ -326,25 +303,6 @@ mod test {
         assert!(needs_relay(&paras, &explicit, &Default::default()));
         explicit.insert(1000, 2);
         assert!(!needs_relay(&paras, &explicit, &Default::default()));
-    }
-
-    #[test]
-    fn cap_refuses_more_than_six_cores() {
-        let a = |cores: &[u32]| {
-            cores
-                .iter()
-                .enumerate()
-                .map(|(i, c)| CoreAssignment {
-                    para_id: 1000 + i as u32,
-                    cores: *c,
-                    source: CoreSource::Relay,
-                })
-                .collect::<Vec<_>>()
-        };
-        assert!(check_cap(&a(&[3, 3])).is_ok());
-        let err = check_cap(&a(&[3, 3, 1])).unwrap_err().to_string();
-        assert!(err.contains("needs 7 cores"), "{err}");
-        assert!(err.contains("--para-cores"), "{err}");
     }
 
     #[tokio::test]

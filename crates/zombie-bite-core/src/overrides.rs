@@ -7,11 +7,15 @@ use tracing::{info, warn};
 use crate::{
     config::{get_assigned_cores, CoresOverride, Parachain, Relaychain},
     metadata::{nested_mut, set_field, storage_key, ChainMetadata, RuntimeCheck},
-    utils::{get_validator_keys, CollatorSessionKeys, ParaId, ValidationCode},
+    utils::{relay_validators, CollatorSessionKeys, ParaId, ValidationCode, ValidatorKeys},
 };
 
 use zombienet_sdk::generators::core_assignment;
 use zombienet_sdk::subxt::ext::scale_value::Value as ScaleValue;
+
+/// Relay validators above which a bite warns: each one is a full relay node,
+/// and they all run on one host.
+const MANY_VALIDATORS: u32 = 16;
 
 /// Storage overrides and injects for one chain, keyed by pallet and item name.
 ///
@@ -333,12 +337,9 @@ fn patch_num_cores(
 }
 
 /// Generate the injects for Session.NextKeys storage overrides for validators
-fn generate_next_keys_injects(
-    set: &mut OverrideSet<'_>,
-    validator_keys: &[&crate::utils::ValidatorKeys],
-) {
+fn generate_next_keys_injects(set: &mut OverrideSet<'_>, validator_keys: &[ValidatorKeys]) {
     for keys in validator_keys {
-        let stash_bytes = hex::decode(keys.stash).expect("stash should be valid hex");
+        let stash_bytes = hex::decode(&keys.stash).expect("stash should be valid hex");
         let stash_hash = array_bytes::bytes2hex("", &subhasher::twox64_concat(&stash_bytes)[..8]);
         set.inject_map(
             "Session",
@@ -352,7 +353,7 @@ fn generate_next_keys_injects(
 /// Generate the storage overrides for relay chain validators
 fn generate_rc_overrides(
     set: &mut OverrideSet<'_>,
-    validator_keys: &[&crate::utils::ValidatorKeys],
+    validator_keys: &[ValidatorKeys],
     req_cores: u32,
 ) {
     let num_validators = validator_keys.len();
@@ -360,7 +361,7 @@ fn generate_rc_overrides(
     // Build stash list for validators (concatenated hex)
     let stash_list: String = validator_keys
         .iter()
-        .map(|v| v.stash)
+        .map(|v| v.stash.as_str())
         .collect::<Vec<_>>()
         .join("");
 
@@ -388,13 +389,13 @@ fn generate_rc_overrides(
     // Build authority discovery keys
     let authority_discovery_keys: String = validator_keys
         .iter()
-        .map(|v| v.authority_discovery)
+        .map(|v| v.authority_discovery.as_str())
         .collect::<Vec<_>>()
         .join("");
 
     // Build validator indices for parachain shared
-    let validator_indices: String = (0..num_validators)
-        .map(|i| format!("{:02x}000000", i))
+    let validator_indices: String = (0..num_validators as u32)
+        .map(|i| hex::encode(i.encode()))
         .collect::<Vec<_>>()
         .join("");
 
@@ -411,12 +412,12 @@ fn generate_rc_overrides(
     // Build para validator keys (same as authority discovery for our purposes)
     let para_validator_keys: String = validator_keys
         .iter()
-        .map(|v| v.para_validator)
+        .map(|v| v.para_validator.as_str())
         .collect::<Vec<_>>()
         .join("");
 
-    // Format validator count as compact encoded
-    let validator_count_hex = format!("{:02x}", num_validators * 4); // *4 because we encode each as 4 bytes
+    // SCALE length prefix of every per-validator vec
+    let validator_count_hex = hex::encode(codec::Compact(num_validators as u32).encode());
 
     let stashes = format!("{validator_count_hex}{stash_list}");
     // Only present on chains using the validator-set pallet.
@@ -619,12 +620,12 @@ pub async fn generate_default_overrides_for_rc(
     keep_messaging_state: bool,
 ) -> Result<PathBuf, anyhow::Error> {
     let num_validators = crate::config::num_validators_for_cores(req_cores);
-    if req_cores > num_validators {
-        anyhow::bail!(
-            "{req_cores} cores requested but only {num_validators} dev validators exist; every core needs a validator group, so reduce per-para cores"
+    if num_validators > MANY_VALIDATORS {
+        warn!(
+            "{req_cores} cores need {num_validators} relay validators, each a full relay node on this host; lower the cores with --para-cores if the fork is too heavy"
         );
     }
-    let validator_keys = get_validator_keys(num_validators as usize);
+    let validator_keys = relay_validators(num_validators as usize);
 
     let mut set = OverrideSet::new(meta.map(|m| m as &dyn RuntimeCheck));
 
@@ -931,7 +932,7 @@ mod test {
     use codec::Encode;
     use serde_json::json;
 
-    use crate::utils::{get_validator_keys, ParaId};
+    use crate::utils::{relay_validators, ParaId};
 
     use super::*;
 
@@ -961,7 +962,7 @@ mod test {
 
     #[test]
     fn test_generate_next_keys_injects() {
-        let validator_keys = get_validator_keys(2);
+        let validator_keys = relay_validators(2);
         let mut set = OverrideSet::new(None);
         generate_next_keys_injects(&mut set, &validator_keys);
 
@@ -978,7 +979,7 @@ mod test {
     #[test]
     fn test_generate_validator_overrides() {
         // Just 2 is alice and bob
-        let validator_keys = get_validator_keys(2);
+        let validator_keys = relay_validators(2);
         let para = crate::config::Parachain::new("asset-hub");
         let paras = vec![&para];
         let rc = Relaychain::new("polkadot");
@@ -1105,7 +1106,7 @@ mod test {
 
     #[test]
     fn keep_messaging_state_leaves_channels_alone() {
-        let validator_keys = get_validator_keys(2);
+        let validator_keys = relay_validators(2);
         let para = crate::config::Parachain::new("asset-hub");
         let paras = vec![&para];
         let rc = Relaychain::new("polkadot");

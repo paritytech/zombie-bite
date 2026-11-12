@@ -209,7 +209,7 @@ In a config file the stack goes in a `[stack]` table; `[relaychain]` and `[[para
 #### Cores and messaging state
 
 - Each para's cores are read from the relay's `ParachainHost_claim_queue` (at `--rc-bite-at` when set, head otherwise), for system, `custom%` and stack paras alike. Precedence: `--para-cores <para_id>=<cores>` > config `cores` / custom `req_cores` > the relay > built-in defaults (used, with a warning, when the relay can't be read). A para with no core on the relay gets 1. The bite logs where each count came from.
-- The relay's validator count follows the total, capped at 7, so a bite needing more than 6 cores is refused before syncing; lower them with `--para-cores`.
+- The relay runs one validator per core plus a spare (at least 2), so every core gets a backing group. The first seven are the dev accounts (`alice`, `bob`, `charlie`, `dave`, `ferdie`, `eve`, `one`), the rest are named `validator-8`, `validator-9`, …; their keys are derived the way zombienet fills their keystores. Every validator is a full relay node on the host, so the bite warns above 16; lower the cores with `--para-cores` if the fork is too heavy.
 - `--keep-messaging-state` keeps the inherited HRMP/DMP state instead of clearing it. Only correct when the relay's parachains are exactly the ones being bitten, so both snapshots agree on channel heads; on a shared relay the mismatch makes cumulus panic with `HRMP head mismatch`.
 
 #### Overrides are checked against the runtime
