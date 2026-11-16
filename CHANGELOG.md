@@ -10,6 +10,8 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+## [0.7.0] - 2026-11-16
+
 ### Added
 
 - Bite a Trinity stack from its descriptor with `--stack <url|file|polkadotapp://stack link>`
@@ -22,6 +24,9 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
   every other reader.
 - `[relaychain]` takes a `chain_spec`, so a custom relay can be written in a
   config file, and `[[parachains]]` takes a `role`.
+- The sudo account (`ZOMBIE_SUDO`, or Alice) of the relay and of each para is
+  funded with 10M units (10^17 planck) in `System::Account` when the runtime has a
+  `Sudo` pallet, so it can pay fees on the fork ([#168]).
 
 ### Fixed
 
@@ -38,7 +43,7 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 - Every bitten para's core count is read from the relay's claim queue (at
   `--rc-bite-at` when set), not only a stack's: system paras also get the
-  count from relay-chain and hard-coded counts are just keep as fallback,
+  count from relay-chain and hard-coded counts are only kept as a fallback,
   and a `custom%` para or `type = "custom"` entry without
   `req_cores` / `cores` gets its live count instead of 1. `--para-cores` and
   config counts still win; the old counts are the fallback when the relay
@@ -52,7 +57,7 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 - A custom relay's epoch length is read from its runtime
   (`Babe::EpochDuration`) instead of assumed to be 600 slots.
 - Bump `spin` from 0.9.8, which is yanked on crates.io, to 0.9.9 in
-  `Cargo.lock`. It is pulled in through `wasmi`.  
+  `Cargo.lock`. It is pulled in through `wasmi` ([#164]).
 
 ## [0.6.5] - 2026-11-06
 
@@ -410,7 +415,8 @@ First tagged release.
 - Collator log levels ([#45]).
 - `ZOMBIE_SUDO` to set the sudo key and the `RcMigrator` manager ([#44]).
 
-[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.6.5...HEAD
+[Unreleased]: https://github.com/pepoviola/zombie-bite/compare/v0.7.0...HEAD
+[0.7.0]: https://github.com/pepoviola/zombie-bite/compare/v0.6.5...v0.7.0
 [0.6.5]: https://github.com/pepoviola/zombie-bite/compare/v0.6.4...v0.6.5
 [0.6.4]: https://github.com/pepoviola/zombie-bite/compare/v0.6.3...v0.6.4
 [0.6.3]: https://github.com/pepoviola/zombie-bite/compare/v0.6.2...v0.6.3
@@ -500,5 +506,7 @@ First tagged release.
 [#159]: https://github.com/pepoviola/zombie-bite/pull/159
 [#161]: https://github.com/pepoviola/zombie-bite/pull/161
 [#163]: https://github.com/paritytech/zombie-bite/issues/163
+[#164]: https://github.com/pepoviola/zombie-bite/pull/164
 [#165]: https://github.com/paritytech/zombie-bite/issues/165
 [#166]: https://github.com/paritytech/zombie-bite/issues/166
+[#168]: https://github.com/pepoviola/zombie-bite/pull/168
