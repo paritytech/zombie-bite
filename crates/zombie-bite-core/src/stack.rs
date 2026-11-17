@@ -246,14 +246,13 @@ pub async fn materialize(
     let relay = relay_chain(&descriptor);
     let relay_rpc = pick_endpoint(relay).await?;
     let relay_spec = download_spec(&http, relay, &spec_dir, &relay_name).await?;
-    let relay_spec_id = spec_id(&relay_spec).await?;
 
     let mut parachains = vec![];
     for chain in chains {
         let para_id = chain.para_id.expect("validated");
         let rpc = pick_endpoint(chain).await?;
         let spec = download_spec(&http, chain, &spec_dir, &relay_name).await?;
-        check_para_spec(&spec, para_id, &relay_spec_id).await?;
+        check_para_spec(&spec, para_id).await?;
 
         info!("🧩 {} (para {para_id}): rpc {rpc}", chain.role);
 
@@ -564,20 +563,10 @@ async fn read_spec(path: &Path) -> Result<serde_json::Value, anyhow::Error> {
         .with_context(|| format!("{} is not a json chain-spec", path.display()))
 }
 
-async fn spec_id(path: &Path) -> Result<String, anyhow::Error> {
-    read_spec(path).await?["id"]
-        .as_str()
-        .map(str::to_string)
-        .ok_or_else(|| anyhow!("chain-spec {} has no 'id'", path.display()))
-}
-
-/// A para's chain-spec has to name the descriptor's para id and the stack's
-/// relay, or the fork would wire it to the wrong chain.
-async fn check_para_spec(
-    path: &Path,
-    para_id: u32,
-    relay_spec_id: &str,
-) -> Result<(), anyhow::Error> {
+/// Fails when the chain-spec's para id differs from the descriptor's. `relay_chain`
+/// isn't compared with the relay spec's `id`: it is the relay's `--chain` value
+/// (`westend`), and the id can differ (`westend2`).
+async fn check_para_spec(path: &Path, para_id: u32) -> Result<(), anyhow::Error> {
     let spec = read_spec(path).await?;
     let spec_para_id = spec
         .get("para_id")
@@ -587,18 +576,6 @@ async fn check_para_spec(
         if spec_para_id != u64::from(para_id) {
             bail!(
                 "chain-spec {} is for para {spec_para_id}, the descriptor says {para_id}",
-                path.display()
-            );
-        }
-    }
-    let relay_chain = spec
-        .get("relay_chain")
-        .or_else(|| spec.get("relayChain"))
-        .and_then(|v| v.as_str());
-    if let Some(relay_chain) = relay_chain {
-        if relay_chain != relay_spec_id {
-            bail!(
-                "chain-spec {} belongs to relay '{relay_chain}', the stack's relay is '{relay_spec_id}'",
                 path.display()
             );
         }
@@ -968,5 +945,23 @@ mod tests {
         StackPointer::parse(&stack.pointer, stack.key.as_deref()).unwrap();
         let merged = merge_user_config(derived(), Some(&user)).unwrap();
         assert_eq!(merged.parachains.unwrap()[0].cores, Some(3));
+    }
+
+    #[tokio::test]
+    async fn para_spec_check_ignores_relay_chain() {
+        let dir = std::env::temp_dir().join("zb-stack-para-spec");
+        let _ = fs::remove_dir_all(&dir).await;
+        fs::create_dir_all(&dir).await.unwrap();
+        // Westend's Asset Hub spec: the relay spec's id is `westend2`.
+        let path = dir.join("assethub.json");
+        fs::write(
+            &path,
+            r#"{"id":"asset-hub-westend","para_id":1000,"relay_chain":"westend"}"#,
+        )
+        .await
+        .unwrap();
+
+        assert!(check_para_spec(&path, 1000).await.is_ok());
+        assert!(check_para_spec(&path, 1001).await.is_err());
     }
 }
