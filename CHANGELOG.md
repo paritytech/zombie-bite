@@ -10,6 +10,8 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+## [0.7.1] - 2026-11-17
+
 ### Fixed
 
 - `--stack` now accepts a stack whose para chain-specs have the relay's
