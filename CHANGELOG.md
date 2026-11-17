@@ -10,6 +10,13 @@ and, starting with 0.5.0, `zombie-bite-core` (the library it is built on).
 
 ## [Unreleased]
 
+### Fixed
+
+- `--stack` now accepts a stack whose para chain-specs have the relay's
+  `--chain` value in `relay_chain` instead of the relay spec's id, as Westend's
+  do (`westend` vs `westend2`). It failed with "chain-spec … belongs to relay
+  'westend', the stack's relay is 'westend2'".
+
 ## [0.7.0] - 2026-11-16
 
 ### Added
